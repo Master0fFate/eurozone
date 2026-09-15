@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+# eurozone — Shift+4 currency toggle (EUR / USD)
+# Default: numbered menu that stays open. Pick 1 or 2 and it applies.
+
+set -u
+IFS=$'\n\t'
+
+VERSION="1.2.0"
+
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+CONF_DIR="$XDG_CONFIG_HOME/eurozone"
+CACHE_DIR="$XDG_CACHE_HOME/eurozone"
+MODE_FILE="$CONF_DIR/mode"
+KEY_FILE="$CONF_DIR/keycode"
+PREV_FILE="$CACHE_DIR/prev.xmodmap"
+
+mkdir -p "$CONF_DIR" "$CACHE_DIR"
+
+# Admin prompt. xmodmap itself does not need root; user asked for the prompt
+# on every OS so elevated sessions and policy kits stay consistent.
+if [ "${EZ_NO_SUDO:-}" != "1" ] && [ "$(id -u)" -ne 0 ] && [ -t 0 ] && command -v sudo >/dev/null 2>&1; then
+  exec sudo -E env EZ_NO_SUDO=1 bash "$0" "$@"
+fi
+
+EZ_BLUE="" EZ_DIM="" EZ_BOLD="" EZ_RED="" EZ_RST=""
+
+ez_color_ok() {
+  [ -t 1 ] || return 1
+  [ -n "${NO_COLOR:-}" ] && return 1
+  [ "${TERM:-dumb}" = "dumb" ] && return 1
+  return 0
+}
+
+if ez_color_ok; then
+  EZ_BLUE=$'\033[94m'
+  EZ_DIM=$'\033[2m'
+  EZ_BOLD=$'\033[1m'
+  EZ_RED=$'\033[31m'
+  EZ_RST=$'\033[0m'
+fi
+
+banner() {
+  printf '%s\n' "${EZ_BLUE}\
+                    *
+               *         *
+           *                 *
+         *                     *
+           *                 *
+               *         *
+                    *
+
+  ____  _   _  ____    ___   _____  ___   _   _  ____
+ |  __|| | | ||  _ \\  / _ \\ |__  / / _ \\ | \\ | ||  __|
+ | |_  | | | || |_) || | | |  / / | | | ||  \\| || |_
+ |  _| | |_| ||  _ < | |_| | / /_ | |_| || |\\  ||  _|
+ |____| \\___/ |_| \\_\\ \\___/ /____| \\___/ |_| \\_||____|\
+${EZ_RST}"
+}
+
+ok()  { printf '%s\n' "  ${EZ_BLUE}*${EZ_RST} $*"; }
+err() { printf '%s\n' "  ${EZ_RED}*${EZ_RST} $*" >&2; }
+
+os_family() {
+  case "$(uname -s 2>/dev/null || echo unknown)" in
+    Linux*)  echo linux ;;
+    Darwin*) echo macos ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) echo windows ;;
+    *) echo unknown ;;
+  esac
+}
+
+read_mode() {
+  if [ -f "$MODE_FILE" ]; then
+    cat "$MODE_FILE"
+  else
+    echo dollar
+  fi
+}
+
+write_mode() {
+  printf '%s\n' "$1" > "$MODE_FILE"
+}
+
+symbol_for() {
+  case "$1" in
+    euro)   printf '%s' '€' ;;
+    dollar) printf '%s' '$' ;;
+    *)      printf '%s' '?' ;;
+  esac
+}
+
+probe_keycode() {
+  if [ -f "$KEY_FILE" ]; then
+    cat "$KEY_FILE"
+    return
+  fi
+  if command -v xmodmap >/dev/null 2>&1; then
+    kc="$(xmodmap -pke 2>/dev/null | awk '
+      $1=="keycode" && $3=="=" && $4=="4" { print $2; exit }
+    ' || true)"
+    if [ -n "${kc:-}" ]; then
+      printf '%s\n' "$kc" > "$KEY_FILE"
+      printf '%s\n' "$kc"
+      return
+    fi
+  fi
+  printf '%s\n' "13" > "$KEY_FILE"
+  printf '%s\n' "13"
+}
+
+apply_linux() {
+  local mode="$1" kc shifted
+  if ! command -v xmodmap >/dev/null 2>&1; then
+    err "xmodmap not found"
+    return 1
+  fi
+  if [ -z "${DISPLAY:-}" ]; then
+    err "no DISPLAY — X11 remap skipped, mode still saved"
+    return 1
+  fi
+  kc="$(probe_keycode)"
+  mkdir -p "$CACHE_DIR"
+  xmodmap -pke 2>/dev/null | awk -v k="$kc" '$1=="keycode" && $2==k { print; exit }' > "$PREV_FILE" || true
+  case "$mode" in
+    euro)   shifted="EuroSign" ;;
+    dollar) shifted="dollar" ;;
+  esac
+  xmodmap -e "keycode ${kc} = 4 ${shifted} 4 ${shifted}"
+  ok "Shift+4 -> $(symbol_for "$mode")   keycode ${kc}"
+}
+
+apply_macos() {
+  local mode="$1"
+  local dest="$CONF_DIR/karabiner-complex.json"
+  cat > "$dest" <<'EOF'
+{
+  "title": "eurozone Shift+4",
+  "rules": [
+    {
+      "description": "eurozone: Shift+4 -> euro (US: Option+Shift+2)",
+      "manipulators": [
+        {
+          "type": "basic",
+          "from": { "key_code": "4", "modifiers": { "mandatory": ["shift"], "optional": ["caps_lock"] } },
+          "to": [ { "key_code": "2", "modifiers": ["left_option", "left_shift"] } ]
+        }
+      ]
+    }
+  ]
+}
+EOF
+  if [ "$mode" = "euro" ]; then
+    ok "wrote Karabiner rule  $dest"
+    ok "import it once in Karabiner-Elements"
+  else
+    ok "dollar mode — disable the eurozone rule in Karabiner"
+  fi
+}
+
+apply_now() {
+  local mode
+  mode="$(read_mode)"
+  case "$(os_family)" in
+    linux)   apply_linux "$mode" || true ;;
+    macos)   apply_macos "$mode" || true ;;
+    windows) ok "use eurozone.cmd on Windows" ;;
+    *)       ok "mode saved, no hook for this OS" ;;
+  esac
+}
+
+show_doctor() {
+  printf '\n'
+  ok "version   ${VERSION}"
+  ok "os        $(os_family)  ($(uname -s 2>/dev/null || echo ?))"
+  ok "mode      $(read_mode)  $(symbol_for "$(read_mode)")"
+  ok "config    ${CONF_DIR}"
+  case "$(os_family)" in
+    linux)
+      ok "session   ${XDG_SESSION_TYPE:-unknown}"
+      ok "DISPLAY   ${DISPLAY:-none}"
+      if command -v xmodmap >/dev/null 2>&1; then
+        ok "xmodmap   $(command -v xmodmap)"
+        ok "keycode 4 $(probe_keycode)"
+      else
+        ok "xmodmap   missing"
+      fi
+      ;;
+    macos)
+      if [ -d "$HOME/.config/karabiner" ]; then
+        ok "karabiner config found"
+      else
+        ok "karabiner not found"
+      fi
+      ;;
+  esac
+  printf '\n  press Enter to go back\n'
+  read -r _ || true
+}
+
+LAST_MSG=""
+
+show_menu() {
+  while true; do
+    clear 2>/dev/null || printf '\033[2J\033[H'
+    banner
+    printf '\n'
+    mode="$(read_mode)"
+    printf '  now  %s  Shift+4 -> %s\n' "$mode" "$(symbol_for "$mode")"
+    if [ -n "$LAST_MSG" ]; then
+      printf '%s\n' "  ${EZ_BLUE}${LAST_MSG}${EZ_RST}"
+    fi
+    printf '\n'
+    if [ "$mode" = "euro" ]; then
+      printf '  1  euro     Shift+4 becomes €  [active]\n'
+    else
+      printf '  1  euro     Shift+4 becomes €\n'
+    fi
+    if [ "$mode" = "dollar" ]; then
+      printf '  2  dollar   Shift+4 becomes $  [active]\n'
+    else
+      printf '  2  dollar   Shift+4 becomes $\n'
+    fi
+    printf '  3  doctor\n'
+    printf '  4  quit\n'
+    printf '\n'
+    printf '  '
+    if ! read -r choice; then
+      printf '\n'
+      return
+    fi
+    choice="$(printf '%s' "$choice" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    case "$choice" in
+      1|e|euro)
+        write_mode euro
+        apply_now
+        LAST_MSG="applied euro"
+        ;;
+      2|d|dollar)
+        write_mode dollar
+        apply_now
+        LAST_MSG="applied dollar"
+        ;;
+      3)
+        clear 2>/dev/null || true
+        banner
+        show_doctor
+        ;;
+      4|q|quit|x|exit)
+        return
+        ;;
+      *)
+        LAST_MSG="type 1, 2, 3 or 4"
+        ;;
+    esac
+  done
+}
+
+# no args: stay in the menu
+if [ "${1:-}" = "" ]; then
+  show_menu
+  exit 0
+fi
+
+case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+  1|euro|eur)
+    write_mode euro
+    apply_now
+    ;;
+  2|dollar|usd)
+    write_mode dollar
+    apply_now
+    ;;
+  3)
+    banner
+    show_doctor
+    ;;
+  4|quit)
+    exit 0
+    ;;
+  *)
+    show_menu
+    ;;
+esac

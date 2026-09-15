@@ -1,0 +1,47 @@
+{
+  "title": "eurozone Shift+4",
+  "rules": [
+    {
+      "description": "eurozone: Shift+4 sends euro (US layout: Option+Shift+2)",
+      "manipulators": [
+        {
+          "type": "basic",
+          "from": {
+            "key_code": "4",
+            "modifiers": {
+              "mandatory": ["shift"],
+              "optional": ["caps_lock"]
+            }
+          },
+          "to": [
+            {
+              "key_code": "2",
+              "modifiers": ["left_option", "left_shift"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "description": "eurozone: Shift+4 sends euro (UK layout: Option+2)",
+      "manipulators": [
+        {
+          "type": "basic",
+          "from": {
+            "key_code": "4",
+            "modifiers": {
+              "mandatory": ["shift"],
+              "optional": ["caps_lock"]
+            }
+          },
+          "to": [
+            {
+              "key_code": "2",
+              "modifiers": ["left_option"]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
