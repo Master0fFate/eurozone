@@ -5,10 +5,16 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$Version = "1.2.0"
+$Version = "1.3.0"
 $ConfDir = Join-Path $env:APPDATA "eurozone"
 $ModeFile = Join-Path $ConfDir "mode"
 $PidFile = Join-Path $ConfDir "hook.pid"
+$InstallDir = Join-Path $env:LOCALAPPDATA "eurozone"
+$InstalledScript = Join-Path $InstallDir "eurozone.ps1"
+$RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$RunValue = "eurozone"
+$WindowsPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+$script:StartupError = $null
 
 if (-not (Test-Path $ConfDir)) {
     New-Item -ItemType Directory -Path $ConfDir | Out-Null
@@ -84,13 +90,55 @@ function Get-Symbol([string]$Mode) {
 
 function Write-Ok([string]$Text) { Write-Ez ("  * " + $Text) }
 
+function Get-StartupCommand {
+    return ('"{0}" -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "{1}" --startup' -f $WindowsPowerShell, $InstalledScript)
+}
+
+function Install-EzStartup {
+    try {
+        if (-not (Test-Path $InstallDir)) {
+            New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+        }
+        $source = [IO.Path]::GetFullPath($PSCommandPath)
+        $destination = [IO.Path]::GetFullPath($InstalledScript)
+        if (-not $source.Equals($destination, [StringComparison]::OrdinalIgnoreCase)) {
+            Copy-Item -LiteralPath $source -Destination $destination -Force
+        }
+        if (-not (Test-Path $RunKey)) {
+            New-Item -Path $RunKey -Force | Out-Null
+        }
+        Set-ItemProperty -Path $RunKey -Name $RunValue -Value (Get-StartupCommand)
+        $script:StartupError = $null
+        return $true
+    } catch {
+        $script:StartupError = $_.Exception.Message
+        return $false
+    }
+}
+
+function Test-EzStartup {
+    try {
+        $actual = Get-ItemPropertyValue -Path $RunKey -Name $RunValue -ErrorAction Stop
+        return $actual -eq (Get-StartupCommand)
+    } catch {
+        return $false
+    }
+}
+
 function Get-HookPid {
     if (-not (Test-Path $PidFile)) { return $null }
     $raw = (Get-Content -Path $PidFile -TotalCount 1).Trim()
     $n = 0
-    if (-not [int]::TryParse($raw, [ref]$n)) { return $null }
-    $proc = Get-Process -Id $n -ErrorAction SilentlyContinue
-    if ($proc) { return $n }
+    if (-not [int]::TryParse($raw, [ref]$n)) {
+        Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+        return $null
+    }
+    $proc = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $n" -ErrorAction SilentlyContinue
+    $commandLine = if ($proc) { [string]$proc.CommandLine } else { "" }
+    $isThisScript = $commandLine.IndexOf($PSCommandPath, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $commandLine.IndexOf($InstalledScript, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    $isHook = $isThisScript -and $commandLine.IndexOf("--hook", [StringComparison]::OrdinalIgnoreCase) -ge 0
+    if ($isHook) { return $n }
     Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
     return $null
 }
@@ -138,6 +186,7 @@ function Show-Doctor {
     Write-Ok ("powershell  " + $PSVersionTable.PSVersion.ToString())
     $hp = Get-HookPid
     if ($hp) { Write-Ok "hook        running  pid $hp" } else { Write-Ok "hook        not running" }
+    if (Test-EzStartup) { Write-Ok "startup     registered" } else { Write-Ok "startup     not registered" }
     Write-Host ""
     Write-Host "  press Enter to go back"
     [void](Read-Host)
@@ -154,6 +203,7 @@ function Show-Menu {
         $hookTxt = if ($hp) { "hook on" } else { "hook off" }
         Write-Host ("  now  " + $mode + "  Shift+4 -> " + (Get-Symbol $mode) + "   " + $hookTxt)
         if (-not (Test-EzAdmin)) { Write-Host "  WARNING  not admin  remap will miss elevated windows" }
+        if ($script:StartupError) { Write-Host ("  WARNING  startup registration failed: " + $script:StartupError) }
         if ($last) { Write-Ez ("  " + $last) }
         Write-Host ""
         $a1 = ""
@@ -304,6 +354,13 @@ if ($allArgs -contains "--hook") {
     exit 0
 }
 
+if ($allArgs -contains "--startup") {
+    if ((Get-Mode) -eq "euro") { Start-EzHook }
+    else { Stop-EzHook }
+    exit 0
+}
+
+[void](Install-EzStartup)
 Request-EzAdmin
 
 if ($allArgs.Count -eq 0) {

@@ -40,8 +40,16 @@ No AutoHotkey install. The admin process starts a hidden Shift+4 hook
 (`RegisterHotKey` + `SendInput`). Dollar mode (`2`) kills the hook so
 the layout types `$` again.
 
-Leave the menu window open. Closing it does not always kill the hook;
-pick `2` first if you want `$` back.
+The first run also installs a per-user startup copy in
+`%LOCALAPPDATA%\eurozone` and registers it under the current user's
+Windows `Run` key. At the next sign-in, euro mode is restored
+automatically; dollar mode stays off. The startup hook runs without an
+admin prompt, so it cannot type into elevated applications. Launch
+`eurozone.cmd` manually when the hook must also work in elevated windows.
+Running the launcher again refreshes the installed startup copy.
+
+The hidden hook keeps running after the menu closes. Pick `2` before
+quitting if you want `$` back.
 
 ## Linux / macOS
 
@@ -50,8 +58,21 @@ chmod +x eurozone
 ./eurozone
 ```
 
-Asks for sudo on start. Linux X11 uses `xmodmap` on number-row 4.
-macOS writes a Karabiner rule (`hooks/karabiner-complex.json`).
+The first run installs a per-user login item and refreshes its private copy
+of the launcher. No sudo prompt is needed: `xmodmap` must run as the logged-in
+Linux user, not root.
+
+- **Linux (X11):** installs `~/.config/autostart/eurozone.desktop`. At the
+  next graphical login it restores the saved mode with `xmodmap`. Wayland does
+  not support `xmodmap`, so this release cannot remap it.
+- **macOS:** installs
+  `~/Library/LaunchAgents/com.eurozone.startup.plist`, which restores the saved
+  mode at login. It also places the rule in Karabiner-Elements’
+  `assets/complex_modifications` directory. Enable the **eurozone Shift+4**
+  rule once in Karabiner-Elements; thereafter the login item switches its
+  `eurozone_enabled` variable on for euro mode and off for dollar mode.
+
+Run the launcher again after updating it to refresh the installed login copy.
 
 ## License
 

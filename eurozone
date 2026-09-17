@@ -5,23 +5,23 @@
 set -u
 IFS=$'\n\t'
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 CONF_DIR="$XDG_CONFIG_HOME/eurozone"
 CACHE_DIR="$XDG_CACHE_HOME/eurozone"
 MODE_FILE="$CONF_DIR/mode"
 KEY_FILE="$CONF_DIR/keycode"
 PREV_FILE="$CACHE_DIR/prev.xmodmap"
+INSTALL_DIR="$XDG_DATA_HOME/eurozone"
+INSTALLED_SCRIPT="$INSTALL_DIR/eurozone"
+AUTOSTART_FILE="$XDG_CONFIG_HOME/autostart/eurozone.desktop"
+MAC_LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.eurozone.startup.plist"
+KARABINER_RULES_DIR="$HOME/.config/karabiner/assets/complex_modifications"
 
 mkdir -p "$CONF_DIR" "$CACHE_DIR"
-
-# Admin prompt. xmodmap itself does not need root; user asked for the prompt
-# on every OS so elevated sessions and policy kits stay consistent.
-if [ "${EZ_NO_SUDO:-}" != "1" ] && [ "$(id -u)" -ne 0 ] && [ -t 0 ] && command -v sudo >/dev/null 2>&1; then
-  exec sudo -E env EZ_NO_SUDO=1 bash "$0" "$@"
-fi
 
 EZ_BLUE="" EZ_DIM="" EZ_BOLD="" EZ_RED="" EZ_RST=""
 
@@ -67,6 +67,58 @@ os_family() {
     Darwin*) echo macos ;;
     MINGW*|MSYS*|CYGWIN*|Windows_NT) echo windows ;;
     *) echo unknown ;;
+  esac
+}
+
+script_path() {
+  cd "$(dirname "$0")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$0")"
+}
+
+install_linux_startup() {
+  mkdir -p "$INSTALL_DIR" "$(dirname "$AUTOSTART_FILE")"
+  cp "$(script_path)" "$INSTALLED_SCRIPT"
+  chmod 700 "$INSTALLED_SCRIPT"
+  cat > "$AUTOSTART_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=eurozone
+Comment=Restore eurozone keyboard mode
+Exec=/bin/bash "$INSTALLED_SCRIPT" --startup
+Terminal=false
+X-GNOME-Autostart-enabled=true
+EOF
+}
+
+install_macos_startup() {
+  mkdir -p "$INSTALL_DIR" "$(dirname "$MAC_LAUNCH_AGENT")"
+  cp "$(script_path)" "$INSTALLED_SCRIPT"
+  chmod 700 "$INSTALLED_SCRIPT"
+  cat > "$MAC_LAUNCH_AGENT" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.eurozone.startup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$INSTALLED_SCRIPT</string>
+    <string>--startup</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+</dict>
+</plist>
+EOF
+}
+
+install_startup() {
+  case "$(os_family)" in
+    linux) install_linux_startup ;;
+    macos) install_macos_startup ;;
   esac
 }
 
@@ -130,9 +182,20 @@ apply_linux() {
   ok "Shift+4 -> $(symbol_for "$mode")   keycode ${kc}"
 }
 
+karabiner_cli() {
+  local cli
+  cli="$(type -P karabiner_cli || true)"
+  if [ -n "$cli" ]; then
+    printf '%s\n' "$cli"
+  elif [ -x "/Library/Application Support/org.pqrs/Karabiner-Elements/bin/karabiner_cli" ]; then
+    printf '%s\n' "/Library/Application Support/org.pqrs/Karabiner-Elements/bin/karabiner_cli"
+  fi
+}
+
 apply_macos() {
-  local mode="$1"
-  local dest="$CONF_DIR/karabiner-complex.json"
+  local mode="$1" dest cli value
+  dest="$KARABINER_RULES_DIR/eurozone.json"
+  mkdir -p "$KARABINER_RULES_DIR"
   cat > "$dest" <<'EOF'
 {
   "title": "eurozone Shift+4",
@@ -143,6 +206,7 @@ apply_macos() {
         {
           "type": "basic",
           "from": { "key_code": "4", "modifiers": { "mandatory": ["shift"], "optional": ["caps_lock"] } },
+          "conditions": [ { "type": "variable_if", "name": "eurozone_enabled", "value": 1 } ],
           "to": [ { "key_code": "2", "modifiers": ["left_option", "left_shift"] } ]
         }
       ]
@@ -150,11 +214,16 @@ apply_macos() {
   ]
 }
 EOF
+  cli="$(karabiner_cli)"
+  if [ "$mode" = "euro" ]; then value=1; else value=0; fi
+  if [ -n "$cli" ]; then
+    "$cli" --set-variables "{\"eurozone_enabled\":$value}" || err "Karabiner rejected the eurozone mode"
+  fi
   if [ "$mode" = "euro" ]; then
     ok "wrote Karabiner rule  $dest"
-    ok "import it once in Karabiner-Elements"
+    ok "enable eurozone once in Karabiner-Elements; startup restores it after login"
   else
-    ok "dollar mode — disable the eurozone rule in Karabiner"
+    ok "Shift+4 -> $   Karabiner variable disabled"
   fi
 }
 
@@ -177,6 +246,7 @@ show_doctor() {
   ok "config    ${CONF_DIR}"
   case "$(os_family)" in
     linux)
+      if [ -f "$AUTOSTART_FILE" ]; then ok "startup   registered"; else ok "startup   not registered"; fi
       ok "session   ${XDG_SESSION_TYPE:-unknown}"
       ok "DISPLAY   ${DISPLAY:-none}"
       if command -v xmodmap >/dev/null 2>&1; then
@@ -187,6 +257,7 @@ show_doctor() {
       fi
       ;;
     macos)
+      if [ -f "$MAC_LAUNCH_AGENT" ]; then ok "startup   registered"; else ok "startup   not registered"; fi
       if [ -d "$HOME/.config/karabiner" ]; then
         ok "karabiner config found"
       else
@@ -255,6 +326,15 @@ show_menu() {
     esac
   done
 }
+
+if [ "${1:-}" = "--startup" ]; then
+  apply_now
+  exit 0
+fi
+
+if ! install_startup; then
+  err "could not register login startup"
+fi
 
 # no args: stay in the menu
 if [ "${1:-}" = "" ]; then
