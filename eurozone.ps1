@@ -1,19 +1,17 @@
 # eurozone — Shift+4  $ / €
-# Windows PowerShell 5.1 + 7. Menu stays open. 1 and 2 apply now.
-# Self-elevates. Built-in RegisterHotKey hook. AutoHotkey optional.
+# Windows PowerShell 5.1 + 7. Menu stays open. Regional profiles are per-user.
+# Built-in RegisterHotKey hook. AutoHotkey optional.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$Version = "1.4.0"
+$Version = "2.0.0"
 
-# Keep the initiating user's paths when UAC starts this script with another
-# administrator account. The Run key and mode file belong to the user who
-# launched eurozone, not necessarily the elevated account.
+# Startup may pass the user's paths explicitly so the installed copy uses the
+# same per-user profile and region settings as the menu.
 $script:UserArgs = New-Object 'System.Collections.Generic.List[string]'
 $script:ConfigDirOverride = $null
 $script:InstallDirOverride = $null
-$script:IsElevatedChild = $false
 for ($i = 0; $i -lt $args.Count; $i++) {
     switch ([string]$args[$i]) {
         "--config-dir" {
@@ -22,13 +20,17 @@ for ($i = 0; $i -lt $args.Count; $i++) {
         "--install-dir" {
             if ($i + 1 -lt $args.Count) { $script:InstallDirOverride = [string]$args[++$i] }
         }
-        "--elevated-child" { $script:IsElevatedChild = $true }
         default { [void]$script:UserArgs.Add([string]$args[$i]) }
     }
 }
 
 $ConfDir = if ($script:ConfigDirOverride) { $script:ConfigDirOverride } else { Join-Path $env:APPDATA "eurozone" }
 $ModeFile = Join-Path $ConfDir "mode"
+$ProfileActiveFile = Join-Path $ConfDir "profile.active"
+$ProfileBackupFile = Join-Path $ConfDir "profile.backup.reg"
+$ProfileCatalog = Join-Path $PSScriptRoot "eurozone-profiles.tsv"
+$InternationalKey = "HKCU:\Control Panel\International"
+$InternationalRegistryKey = "HKCU\Control Panel\International"
 $PidFile = Join-Path $ConfDir "hook.pid"
 $InstallDir = if ($script:InstallDirOverride) { $script:InstallDirOverride } else { Join-Path $env:LOCALAPPDATA "eurozone" }
 $InstalledScript = Join-Path $InstallDir "eurozone.ps1"
@@ -45,21 +47,6 @@ function Test-EzAdmin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
     $p = New-Object Security.Principal.WindowsPrincipal($id)
     return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-
-function Request-EzAdmin {
-    if (Test-EzAdmin) { return }
-    $self = $PSCommandPath
-    $forwarded = @($script:UserArgs | ForEach-Object { '"' + $_.Replace('"', '\"') + '"' })
-    $arg = ('-NoProfile -STA -ExecutionPolicy Bypass -File "{0}" --elevated-child --config-dir "{1}" --install-dir "{2}" {3}' -f `
-        $self, $ConfDir, $InstallDir, ($forwarded -join " "))
-    try {
-        Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList $arg | Out-Null
-    } catch {
-        Write-Host "admin permission is required. UAC was cancelled."
-        exit 1
-    }
-    exit 0
 }
 
 function Test-EzColor {
@@ -126,33 +113,114 @@ function Get-Symbol([string]$Mode) {
 
 function Write-Ok([string]$Text) { Write-Ez ("  * " + $Text) }
 
+function Get-RegionProfiles {
+    if (-not (Test-Path -LiteralPath $ProfileCatalog)) {
+        throw "profile catalog not found: $ProfileCatalog"
+    }
+    return @(Import-Csv -LiteralPath $ProfileCatalog -Delimiter '|')
+}
+
+function Get-RegionProfile([string]$Identifier) {
+    $query = $Identifier.Trim()
+    $profile = Get-RegionProfiles | Where-Object {
+        $_.id -eq $query -or $_.culture -eq $query
+    } | Select-Object -First 1
+    if (-not $profile) { throw "unknown profile '$query'; use --list-profiles" }
+    [void][Globalization.CultureInfo]::GetCultureInfo($profile.culture)
+    return $profile
+}
+
+function Show-RegionProfiles {
+    foreach ($profile in (Get-RegionProfiles)) {
+        Write-Host ("  {0,-7} {1,-25} {2}" -f $profile.id, $profile.name, $profile.culture)
+    }
+}
+
+function Save-ProfileActive([string]$ProfileId, [string]$Culture) {
+    $temporary = $ProfileActiveFile + ".tmp"
+    $backup = $temporary + ".bak"
+    [IO.File]::WriteAllText($temporary, ("{0}|{1}`r`n" -f $ProfileId, $Culture), [Text.Encoding]::ASCII)
+    try {
+        if ([IO.File]::Exists($ProfileActiveFile)) {
+            [IO.File]::Replace($temporary, $ProfileActiveFile, $backup)
+        } else {
+            [IO.File]::Move($temporary, $ProfileActiveFile)
+        }
+    } finally {
+        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+        if ([IO.File]::Exists($backup)) { [IO.File]::Delete($backup) }
+    }
+}
+
+function Set-RegionProfile([string]$Identifier) {
+    $profile = Get-RegionProfile $Identifier
+    if (-not [IO.File]::Exists($ProfileBackupFile)) {
+        $regExe = Join-Path $env:SystemRoot "System32\reg.exe"
+        & $regExe export $InternationalRegistryKey $ProfileBackupFile /y | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "could not back up the current Windows regional settings" }
+    }
+    $culture = [Globalization.CultureInfo]::GetCultureInfo($profile.culture)
+    Set-Culture -CultureInfo $culture
+    New-ItemProperty -LiteralPath $InternationalKey -Name sCurrency -Value ([string][char]0x20AC) -PropertyType String -Force | Out-Null
+    New-ItemProperty -LiteralPath $InternationalKey -Name iMeasure -Value "1" -PropertyType String -Force | Out-Null
+    Save-ProfileActive $profile.id $profile.culture
+    $region = [Globalization.RegionInfo]::new($culture.Name)
+    Write-Ok ("regional profile applied: {0} ({1})" -f $profile.name, $culture.Name)
+    if ($region.ISOCurrencySymbol -ne "EUR") {
+        Write-Host ("  WARNING  Windows locale data reports {0}; update Windows for current ISO currency data." -f $region.ISOCurrencySymbol)
+    }
+    Write-Ok "currency symbol set to euro; metric measurement enabled"
+    Write-Ok "interface language, keyboard layout and time zone were not changed"
+    Write-Ok "restart apps or sign out and back in if formats do not update"
+}
+
+function Restore-RegionProfile {
+    if (-not [IO.File]::Exists($ProfileBackupFile)) {
+        throw "no saved Windows regional settings to restore"
+    }
+    $currentSnapshot = Join-Path $ConfDir ".profile-current.reg"
+    $regExe = Join-Path $env:SystemRoot "System32\reg.exe"
+    & $regExe export $InternationalRegistryKey $currentSnapshot /y | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "could not protect the current regional settings before restore" }
+    Remove-Item -LiteralPath $InternationalKey -Recurse -Force
+    & $regExe import $ProfileBackupFile | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        & $regExe import $currentSnapshot | Out-Null
+        throw "could not restore the saved regional settings; current settings were recovered"
+    }
+    Remove-Item -LiteralPath $currentSnapshot -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $ProfileBackupFile -Force
+    Remove-Item -LiteralPath $ProfileActiveFile -Force -ErrorAction SilentlyContinue
+    Write-Ok "previous Windows regional settings restored"
+    Write-Ok "restart apps or sign out and back in if formats do not update"
+}
+
+function Select-RegionProfile {
+    try {
+        Show-RegionProfiles
+        $choice = Read-Host "  enter a profile ID or locale code"
+        $profile = Get-RegionProfile $choice
+        Write-Host ("  Preview: set regional formats to {0} ({1}). Keep display language, keyboard and time zone." -f $profile.name, $profile.culture)
+        $confirm = Read-Host "  apply these settings? [y/N]"
+        if ($confirm -notmatch '^(y|yes)$') {
+            Write-Ok "no regional settings changed"
+            return $false
+        }
+        Set-RegionProfile $profile.id
+        return $true
+    } catch {
+        Write-Ez ("profile failed: " + $_.Exception.Message) Red
+        return $false
+    }
+}
+
 function Get-StartupCommand {
     return ('"{0}" -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "{1}" --startup --config-dir "{2}" --install-dir "{3}"' -f `
         $WindowsPowerShell, $InstalledScript, $ConfDir, $InstallDir)
 }
 
-function Grant-EzAdminStateAccess {
-    # UAC can use credentials for a different administrator account. Grant the
-    # Administrators group modify access to this non-secret per-user state so
-    # the elevated process can use the initiating user's files.
-    $acl = Get-Acl -LiteralPath $ConfDir
-    $adminSid = [Security.Principal.SecurityIdentifier]::new("S-1-5-32-544")
-    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
-        [Security.AccessControl.InheritanceFlags]::ObjectInherit
-    $rule = [Security.AccessControl.FileSystemAccessRule]::new(
-        $adminSid,
-        [Security.AccessControl.FileSystemRights]::Modify,
-        $inheritance,
-        [Security.AccessControl.PropagationFlags]::None,
-        [Security.AccessControl.AccessControlType]::Allow
-    )
-    $acl.SetAccessRule($rule)
-    Set-Acl -LiteralPath $ConfDir -AclObject $acl
-}
-
 function Install-EzStartup {
     try {
-        Grant-EzAdminStateAccess
         if (-not (Test-Path $InstallDir)) {
             New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
         }
@@ -161,6 +229,7 @@ function Install-EzStartup {
         if (-not $source.Equals($destination, [StringComparison]::OrdinalIgnoreCase)) {
             Copy-Item -LiteralPath $source -Destination $destination -Force
         }
+        Copy-Item -LiteralPath $ProfileCatalog -Destination (Join-Path $InstallDir "eurozone-profiles.tsv") -Force
         if (-not (Test-Path $RunKey)) {
             New-Item -Path $RunKey -Force | Out-Null
         }
@@ -223,7 +292,7 @@ function Invoke-Apply {
         Start-EzHook
         Start-Sleep -Milliseconds 800
         if (Get-HookPid) {
-            Write-Ok ("Shift+4 -> " + [char]0x20AC + "   hook running as admin")
+            Write-Ok ("Shift+4 -> " + [char]0x20AC + "   user-level hook running")
         } else {
             Write-Ok "hook failed to start"
         }
@@ -238,6 +307,8 @@ function Show-Doctor {
     Write-Ok "version     $Version"
     Write-Ok ("mode        " + (Get-Mode) + "  " + (Get-Symbol (Get-Mode)))
     Write-Ok ("mode file   " + $ModeFile)
+    Write-Ok ("region      " + (Get-Culture).Name)
+    if (Test-Path $ProfileActiveFile) { Write-Ok ("profile     " + (Get-Content $ProfileActiveFile -TotalCount 1).Trim()) }
     Write-Ok ("admin       " + (Test-EzAdmin))
     Write-Ok ("windows     " + [Environment]::OSVersion.VersionString)
     Write-Ok ("powershell  " + $PSVersionTable.PSVersion.ToString())
@@ -258,7 +329,10 @@ function Show-Menu {
         $mode = Get-Mode
         $hp = Get-HookPid
         $hookTxt = if ($hp) { "hook on" } else { "hook off" }
+        $culture = (Get-Culture).Name
+        $profile = if (Test-Path $ProfileActiveFile) { (Get-Content $ProfileActiveFile -TotalCount 1).Trim() } else { "none" }
         Write-Host ("  now  " + $mode + "  Shift+4 -> " + (Get-Symbol $mode) + "   " + $hookTxt)
+        Write-Host ("  region " + $culture + "   profile " + $profile)
         if (-not (Test-EzAdmin)) { Write-Host "  WARNING  not admin  remap will miss elevated windows" }
         if ($script:StartupError) { Write-Host ("  WARNING  startup registration failed: " + $script:StartupError) }
         if ($last) { Write-Ez ("  " + $last) }
@@ -271,6 +345,8 @@ function Show-Menu {
         Write-Host ("  2  dollar   Shift+4 becomes `$ " + $a2)
         Write-Host "  3  doctor"
         Write-Host "  4  quit"
+        Write-Host "  5  country / regional format profile"
+        Write-Host "  6  restore previous regional settings"
         Write-Host ""
         $choice = Read-Host "  "
         switch -Regex ($choice.Trim()) {
@@ -292,7 +368,14 @@ function Show-Menu {
             "^(4|q|quit|x|exit)$" {
                 return
             }
-            default { $last = "type 1, 2, 3 or 4" }
+            "^5$" {
+                if (Select-RegionProfile) { $last = "regional profile applied" } else { $last = "profile was not applied" }
+            }
+            "^6$" {
+                try { Restore-RegionProfile; $last = "previous regional settings restored" }
+                catch { $last = "restore failed: " + $_.Exception.Message }
+            }
+            default { $last = "type 1, 2, 3, 4, 5 or 6" }
         }
     }
 }
@@ -406,6 +489,19 @@ public class EzHook : Form {
 }
 
 $allArgs = @($script:UserArgs.ToArray())
+if ($allArgs -contains "--list-profiles") {
+    Show-RegionProfiles
+    exit 0
+}
+if ($allArgs.Count -gt 0 -and $allArgs[0] -eq "--profile") {
+    if ($allArgs.Count -lt 2) { Write-Host "usage: eurozone.ps1 --profile PROFILE_ID"; exit 2 }
+    try { Set-RegionProfile $allArgs[1]; exit 0 }
+    catch { Write-Host ("profile failed: " + $_.Exception.Message); exit 1 }
+}
+if ($allArgs -contains "--restore-profile") {
+    try { Restore-RegionProfile; exit 0 }
+    catch { Write-Host ("restore failed: " + $_.Exception.Message); exit 1 }
+}
 if ($allArgs -contains "--hook") {
     Start-HookLoop
     exit 0
@@ -417,8 +513,7 @@ if ($allArgs -contains "--startup") {
     exit 0
 }
 
-if (-not $script:IsElevatedChild) { [void](Install-EzStartup) }
-Request-EzAdmin
+[void](Install-EzStartup)
 
 if ($allArgs.Count -eq 0) {
     Show-Menu

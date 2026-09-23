@@ -1,0 +1,46 @@
+name: cross-OS profile checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  profile-smoke:
+    name: ${{ matrix.os }} profile smoke test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check shell syntax and shared country profiles
+        shell: bash
+        run: |
+          bash -n eurozone
+          bash tests/profile-catalog-smoke.sh
+
+      - name: Apply and restore Windows user region
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/windows-profile-smoke.ps1
+
+      - name: Apply and restore macOS user region
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash tests/macos-profile-smoke.sh
+
+      - name: Apply and restore Linux GNOME user region
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dbus-daemon dbus-x11 dconf-gsettings-backend gsettings-desktop-schemas locales x11-xserver-utils xvfb
+          sudo sed -i '/^# *de_DE.UTF-8 UTF-8/s/^# *//' /etc/locale.gen
+          sudo sed -i '/^# *fr_FR.UTF-8 UTF-8/s/^# *//' /etc/locale.gen
+          sudo locale-gen
+          xvfb-run -a bash tests/linux-x11-key-smoke.sh
+          bash tests/linux-profile-smoke.sh
