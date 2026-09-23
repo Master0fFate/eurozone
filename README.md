@@ -88,8 +88,9 @@ Use menu option **5** to choose a country/locale profile. CLI equivalents:
 - **Linux:** GNOME uses its per-user regional-format setting. A systemd user
   session can use `~/.config/environment.d` for number, date, measurement, and
   paper formats. The locale must be installed for this fallback. Other Linux
-  desktop environments can report unsupported. The Shift+4 remap still needs
-  X11 and `xmodmap`; it does not work on Wayland.
+  desktop environments can report unsupported. The Shift+4 remap needs X11;
+  it uses `xkbcomp` when available and falls back to `xmodmap`. It does not work
+  on Wayland.
 - **macOS:** the profile uses the user's `AppleLocale` setting for regional
   formats. Existing separate measurement, temperature, and time-zone choices
   are left unchanged. The Shift+4 remap uses Karabiner-Elements: enable the

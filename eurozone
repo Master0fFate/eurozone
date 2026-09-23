@@ -395,10 +395,60 @@ probe_keycode() {
   printf '%s\n' "13"
 }
 
+apply_linux_xkb() {
+  local mode="$1" kc="$2" key_name shifted map_file edited_file
+  map_file="$(mktemp "$CACHE_DIR/.eurozone-keymap.XXXXXX")" || return 1
+  edited_file="$map_file.edited"
+  if ! xkbcomp -xkb "$DISPLAY" "$map_file" >/dev/null 2>&1; then
+    rm -f "$map_file" "$edited_file"
+    err "could not read the active XKB keyboard map"
+    return 1
+  fi
+  key_name="$(awk -v wanted="$kc" '
+    /xkb_keycodes[[:space:]]/ { in_keycodes=1; next }
+    in_keycodes && /};/ { in_keycodes=0; next }
+    in_keycodes {
+      name=$1; code=$3; sub(/;$/, "", code)
+      if (name ~ /^<[^>]+>$/ && $2 == "=" && code == wanted) {
+        sub(/^</, "", name); sub(/>$/, "", name); print name; exit
+      }
+    }
+  ' "$map_file")"
+  if [ -z "$key_name" ]; then
+    rm -f "$map_file" "$edited_file"
+    err "XKB has no key name for keycode $kc"
+    return 1
+  fi
+  case "$mode" in
+    euro) shifted="EuroSign" ;;
+    dollar) shifted="dollar" ;;
+  esac
+  if ! awk -v target="<$key_name>" -v symbol="$shifted" '
+    $1 == "key" && $2 == target { in_target=1 }
+    in_target && ((/symbols/ && /\[/) || ($1 == "key" && /\[/)) {
+      if (sub(/,[[:space:]]*[^],]+/, ", " symbol)) changed=1
+    }
+    in_target && /};/ { in_target=0 }
+    { print }
+    END { if (!changed) exit 1 }
+  ' "$map_file" > "$edited_file"; then
+    rm -f "$map_file" "$edited_file"
+    err "could not find a Shift level for XKB key <$key_name>"
+    return 1
+  fi
+  if ! xkbcomp -w0 "$edited_file" "$DISPLAY" >/dev/null 2>&1; then
+    rm -f "$map_file" "$edited_file"
+    err "XKB rejected the $mode mapping for key <$key_name>"
+    return 1
+  fi
+  rm -f "$map_file" "$edited_file"
+  ok "Shift+4 -> $(symbol_for "$mode")   XKB key <$key_name> (keycode $kc)"
+}
+
 apply_linux() {
   local mode="$1" kc shifted
   if ! command -v xmodmap >/dev/null 2>&1; then
-    err "xmodmap not found"
+    err "xmodmap not found (needed to identify the X11 keycode)"
     return 1
   fi
   if [ -z "${DISPLAY:-}" ]; then
@@ -407,6 +457,10 @@ apply_linux() {
   fi
   kc="$(probe_keycode)"
   mkdir -p "$CACHE_DIR"
+  if command -v xkbcomp >/dev/null 2>&1; then
+    apply_linux_xkb "$mode" "$kc"
+    return $?
+  fi
   xmodmap -pke 2>/dev/null | awk -v k="$kc" '$1=="keycode" && $2==k { print; exit }' > "$PREV_FILE" || true
   case "$mode" in
     euro)   shifted="EuroSign" ;;
@@ -510,6 +564,11 @@ show_doctor() {
         ok "keycode 4 $(probe_keycode)"
       else
         ok "xmodmap   missing"
+      fi
+      if command -v xkbcomp >/dev/null 2>&1; then
+        ok "xkbcomp   $(command -v xkbcomp)"
+      else
+        ok "xkbcomp   missing (using xmodmap fallback)"
       fi
       ;;
     macos)

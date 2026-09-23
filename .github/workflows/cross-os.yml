@@ -38,7 +38,7 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y dbus-daemon dbus-x11 dconf-gsettings-backend gsettings-desktop-schemas locales x11-xserver-utils xvfb
+          sudo apt-get install -y dbus-daemon dbus-x11 dconf-gsettings-backend gsettings-desktop-schemas locales x11-xkb-utils x11-xserver-utils xvfb
           sudo sed -i '/^# *de_DE.UTF-8 UTF-8/s/^# *//' /etc/locale.gen
           sudo sed -i '/^# *fr_FR.UTF-8 UTF-8/s/^# *//' /etc/locale.gen
           sudo locale-gen
