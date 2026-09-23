@@ -42,5 +42,5 @@ jobs:
           sudo sed -i '/^# *de_DE.UTF-8 UTF-8/s/^# *//' /etc/locale.gen
           sudo sed -i '/^# *fr_FR.UTF-8 UTF-8/s/^# *//' /etc/locale.gen
           sudo locale-gen
-          xvfb-run -a bash tests/linux-x11-key-smoke.sh
+          xvfb-run -a --server-args='-noreset' bash tests/linux-x11-key-smoke.sh
           bash tests/linux-profile-smoke.sh
