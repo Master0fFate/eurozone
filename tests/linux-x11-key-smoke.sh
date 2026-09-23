@@ -19,7 +19,15 @@ keycode="$(cat "$XDG_CONFIG_HOME/eurozone/keycode")"
 grep -q -- '--config-dir' "$XDG_CONFIG_HOME/autostart/eurozone.desktop"
 mapping="$(xmodmap -pke | awk -v key="$keycode" '$1 == "keycode" && $2 == key { print; exit }')"
 printf 'X11 keycode %s after euro apply: %s\n' "$keycode" "$mapping"
-case "$mapping" in *EuroSign*) ;; *) echo 'EuroSign not present in X11 mapping' >&2; exit 1 ;; esac
+case "$mapping" in
+  *EuroSign*) ;;
+  *)
+    echo "Applying the same mapping directly for diagnostics:" >&2
+    xmodmap -verbose -e "keycode $keycode = 4 EuroSign 4 EuroSign" >&2 || true
+    xmodmap -pke | awk -v key="$keycode" '$1 == "keycode" && $2 == key { print; exit }' >&2
+    exit 1
+    ;;
+esac
 
 bash "$repo_root/eurozone" dollar
 mapping="$(xmodmap -pke | awk -v key="$keycode" '$1 == "keycode" && $2 == key { print; exit }')"
