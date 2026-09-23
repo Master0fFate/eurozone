@@ -17,20 +17,20 @@ keycode="$(cat "$XDG_CONFIG_HOME/eurozone/keycode")"
 [ -f "$XDG_CONFIG_HOME/autostart/eurozone.desktop" ]
 [ -f "$XDG_DATA_HOME/eurozone/eurozone-profiles.tsv" ]
 grep -q -- '--config-dir' "$XDG_CONFIG_HOME/autostart/eurozone.desktop"
-mapping="$(xmodmap -pke | awk -v key="$keycode" '$1 == "keycode" && $2 == key { print; exit }')"
-printf 'X11 keycode %s after euro apply: %s\n' "$keycode" "$mapping"
-case "$mapping" in
-  *EuroSign*) ;;
-  *)
-    echo "Applying the same mapping directly for diagnostics:" >&2
-    xmodmap -verbose -e "keycode $keycode = 4 EuroSign 4 EuroSign" >&2 || true
-    xmodmap -pke | awk -v key="$keycode" '$1 == "keycode" && $2 == key { print; exit }' >&2
-    exit 1
-    ;;
-esac
+keymap="$(xkbcomp -xkb "$DISPLAY" -)"
+printf '%s\n' "$keymap" | awk '
+  $1 == "key" && $2 == "<AE04>" { in_target=1 }
+  in_target && /EuroSign/ { found=1 }
+  in_target && /};/ { in_target=0 }
+  END { exit !found }
+' || { echo 'EuroSign not present in active XKB map' >&2; exit 1; }
 
 bash "$repo_root/eurozone" dollar
-mapping="$(xmodmap -pke | awk -v key="$keycode" '$1 == "keycode" && $2 == key { print; exit }')"
-printf 'X11 keycode %s after dollar apply: %s\n' "$keycode" "$mapping"
-case "$mapping" in *dollar*) ;; *) echo 'dollar not present in X11 mapping' >&2; exit 1 ;; esac
+keymap="$(xkbcomp -xkb "$DISPLAY" -)"
+printf '%s\n' "$keymap" | awk '
+  $1 == "key" && $2 == "<AE04>" { in_target=1 }
+  in_target && /dollar/ { found=1 }
+  in_target && /};/ { in_target=0 }
+  END { exit !found }
+' || { echo 'dollar not present in active XKB map' >&2; exit 1; }
 echo "Linux X11 Shift+4 apply/restore PASS"
