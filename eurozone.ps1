@@ -5,11 +5,32 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$Version = "1.3.0"
-$ConfDir = Join-Path $env:APPDATA "eurozone"
+$Version = "1.4.0"
+
+# Keep the initiating user's paths when UAC starts this script with another
+# administrator account. The Run key and mode file belong to the user who
+# launched eurozone, not necessarily the elevated account.
+$script:UserArgs = New-Object 'System.Collections.Generic.List[string]'
+$script:ConfigDirOverride = $null
+$script:InstallDirOverride = $null
+$script:IsElevatedChild = $false
+for ($i = 0; $i -lt $args.Count; $i++) {
+    switch ([string]$args[$i]) {
+        "--config-dir" {
+            if ($i + 1 -lt $args.Count) { $script:ConfigDirOverride = [string]$args[++$i] }
+        }
+        "--install-dir" {
+            if ($i + 1 -lt $args.Count) { $script:InstallDirOverride = [string]$args[++$i] }
+        }
+        "--elevated-child" { $script:IsElevatedChild = $true }
+        default { [void]$script:UserArgs.Add([string]$args[$i]) }
+    }
+}
+
+$ConfDir = if ($script:ConfigDirOverride) { $script:ConfigDirOverride } else { Join-Path $env:APPDATA "eurozone" }
 $ModeFile = Join-Path $ConfDir "mode"
 $PidFile = Join-Path $ConfDir "hook.pid"
-$InstallDir = Join-Path $env:LOCALAPPDATA "eurozone"
+$InstallDir = if ($script:InstallDirOverride) { $script:InstallDirOverride } else { Join-Path $env:LOCALAPPDATA "eurozone" }
 $InstalledScript = Join-Path $InstallDir "eurozone.ps1"
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $RunValue = "eurozone"
@@ -29,7 +50,9 @@ function Test-EzAdmin {
 function Request-EzAdmin {
     if (Test-EzAdmin) { return }
     $self = $PSCommandPath
-    $arg = "-NoProfile -STA -ExecutionPolicy Bypass -File `"$self`""
+    $forwarded = @($script:UserArgs | ForEach-Object { '"' + $_.Replace('"', '\"') + '"' })
+    $arg = ('-NoProfile -STA -ExecutionPolicy Bypass -File "{0}" --elevated-child --config-dir "{1}" --install-dir "{2}" {3}' -f `
+        $self, $ConfDir, $InstallDir, ($forwarded -join " "))
     try {
         Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList $arg | Out-Null
     } catch {
@@ -81,7 +104,20 @@ function Get-Mode {
 }
 
 function Set-Mode([string]$Mode) {
-    Set-Content -Path $ModeFile -Value $Mode -Encoding ASCII
+    $temporary = Join-Path $ConfDir (".mode." + [Guid]::NewGuid().ToString("N"))
+    $backup = $temporary + ".bak"
+    [IO.File]::WriteAllText($temporary, ($Mode + "`r`n"), [Text.Encoding]::ASCII)
+    try {
+        if ([IO.File]::Exists($ModeFile)) {
+            # Windows PowerShell 5.1 requires a valid backup path here.
+            [IO.File]::Replace($temporary, $ModeFile, $backup)
+        } else {
+            [IO.File]::Move($temporary, $ModeFile)
+        }
+    } finally {
+        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+        if ([IO.File]::Exists($backup)) { [IO.File]::Delete($backup) }
+    }
 }
 
 function Get-Symbol([string]$Mode) {
@@ -91,11 +127,32 @@ function Get-Symbol([string]$Mode) {
 function Write-Ok([string]$Text) { Write-Ez ("  * " + $Text) }
 
 function Get-StartupCommand {
-    return ('"{0}" -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "{1}" --startup' -f $WindowsPowerShell, $InstalledScript)
+    return ('"{0}" -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "{1}" --startup --config-dir "{2}" --install-dir "{3}"' -f `
+        $WindowsPowerShell, $InstalledScript, $ConfDir, $InstallDir)
+}
+
+function Grant-EzAdminStateAccess {
+    # UAC can use credentials for a different administrator account. Grant the
+    # Administrators group modify access to this non-secret per-user state so
+    # the elevated process can use the initiating user's files.
+    $acl = Get-Acl -LiteralPath $ConfDir
+    $adminSid = [Security.Principal.SecurityIdentifier]::new("S-1-5-32-544")
+    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+        $adminSid,
+        [Security.AccessControl.FileSystemRights]::Modify,
+        $inheritance,
+        [Security.AccessControl.PropagationFlags]::None,
+        [Security.AccessControl.AccessControlType]::Allow
+    )
+    $acl.SetAccessRule($rule)
+    Set-Acl -LiteralPath $ConfDir -AclObject $acl
 }
 
 function Install-EzStartup {
     try {
+        Grant-EzAdminStateAccess
         if (-not (Test-Path $InstallDir)) {
             New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
         }
@@ -154,10 +211,9 @@ function Stop-EzHook {
 function Start-EzHook {
     Stop-EzHook
     $self = $PSCommandPath
-    $p = Start-Process -FilePath "powershell.exe" -PassThru -WindowStyle Hidden -ArgumentList @(
-        "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass",
-        "-File", $self, "--hook"
-    )
+    $arg = ('-NoProfile -STA -ExecutionPolicy Bypass -File "{0}" --hook --config-dir "{1}" --install-dir "{2}"' -f `
+        $self, $ConfDir, $InstallDir)
+    $p = Start-Process -FilePath "powershell.exe" -PassThru -WindowStyle Hidden -ArgumentList $arg
     Set-Content -Path $PidFile -Value ([string]$p.Id) -Encoding ASCII
 }
 
@@ -181,6 +237,7 @@ function Show-Doctor {
     Write-Host ""
     Write-Ok "version     $Version"
     Write-Ok ("mode        " + (Get-Mode) + "  " + (Get-Symbol (Get-Mode)))
+    Write-Ok ("mode file   " + $ModeFile)
     Write-Ok ("admin       " + (Test-EzAdmin))
     Write-Ok ("windows     " + [Environment]::OSVersion.VersionString)
     Write-Ok ("powershell  " + $PSVersionTable.PSVersion.ToString())
@@ -348,7 +405,7 @@ public class EzHook : Form {
     }
 }
 
-$allArgs = @($args | ForEach-Object { [string]$_ })
+$allArgs = @($script:UserArgs.ToArray())
 if ($allArgs -contains "--hook") {
     Start-HookLoop
     exit 0
@@ -360,7 +417,7 @@ if ($allArgs -contains "--startup") {
     exit 0
 }
 
-[void](Install-EzStartup)
+if (-not $script:IsElevatedChild) { [void](Install-EzStartup) }
 Request-EzAdmin
 
 if ($allArgs.Count -eq 0) {

@@ -5,12 +5,22 @@
 set -u
 IFS=$'\n\t'
 
-VERSION="1.3.0"
+VERSION="1.4.0"
+
+# Autostart sessions can have a different environment from the shell that
+# installed the login item. Pin the config directory in the startup command.
+CONFIG_DIR_OVERRIDE=""
+if [ "${1:-}" = "--config-dir" ]; then
+  if [ "$#" -ge 3 ]; then
+    CONFIG_DIR_OVERRIDE="$2"
+    shift 2
+  fi
+fi
 
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
-CONF_DIR="$XDG_CONFIG_HOME/eurozone"
+CONF_DIR="${CONFIG_DIR_OVERRIDE:-$XDG_CONFIG_HOME/eurozone}"
 CACHE_DIR="$XDG_CACHE_HOME/eurozone"
 MODE_FILE="$CONF_DIR/mode"
 KEY_FILE="$CONF_DIR/keycode"
@@ -74,16 +84,35 @@ script_path() {
   cd "$(dirname "$0")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$0")"
 }
 
+desktop_escape() {
+  local value="$1"
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//%/%%}
+  printf '%s' "$value"
+}
+
+plist_escape() {
+  local value="$1"
+  value=${value//&/\&amp;}
+  value=${value//</\&lt;}
+  value=${value//>/\&gt;}
+  printf '%s' "$value"
+}
+
 install_linux_startup() {
   mkdir -p "$INSTALL_DIR" "$(dirname "$AUTOSTART_FILE")"
   cp "$(script_path)" "$INSTALLED_SCRIPT"
   chmod 700 "$INSTALLED_SCRIPT"
+  local script_arg config_arg
+  script_arg="$(desktop_escape "$INSTALLED_SCRIPT")"
+  config_arg="$(desktop_escape "$CONF_DIR")"
   cat > "$AUTOSTART_FILE" <<EOF
 [Desktop Entry]
 Type=Application
 Name=eurozone
 Comment=Restore eurozone keyboard mode
-Exec=/bin/bash "$INSTALLED_SCRIPT" --startup
+Exec=/bin/bash "$script_arg" --config-dir "$config_arg" --startup
 Terminal=false
 X-GNOME-Autostart-enabled=true
 EOF
@@ -93,6 +122,9 @@ install_macos_startup() {
   mkdir -p "$INSTALL_DIR" "$(dirname "$MAC_LAUNCH_AGENT")"
   cp "$(script_path)" "$INSTALLED_SCRIPT"
   chmod 700 "$INSTALLED_SCRIPT"
+  local script_arg config_arg
+  script_arg="$(plist_escape "$INSTALLED_SCRIPT")"
+  config_arg="$(plist_escape "$CONF_DIR")"
   cat > "$MAC_LAUNCH_AGENT" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -103,7 +135,9 @@ install_macos_startup() {
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>$INSTALLED_SCRIPT</string>
+    <string>$script_arg</string>
+    <string>--config-dir</string>
+    <string>$config_arg</string>
     <string>--startup</string>
   </array>
   <key>RunAtLoad</key>
@@ -123,15 +157,32 @@ install_startup() {
 }
 
 read_mode() {
+  local mode="dollar"
   if [ -f "$MODE_FILE" ]; then
-    cat "$MODE_FILE"
-  else
-    echo dollar
+    IFS= read -r mode < "$MODE_FILE" || true
   fi
+  case "$mode" in
+    euro|dollar) printf '%s\n' "$mode" ;;
+    *) printf '%s\n' dollar ;;
+  esac
 }
 
 write_mode() {
-  printf '%s\n' "$1" > "$MODE_FILE"
+  local temporary
+  temporary="$(mktemp "$CONF_DIR/.mode.XXXXXX")" || {
+    err "could not create temporary mode file in $CONF_DIR"
+    return 1
+  }
+  if ! printf '%s\n' "$1" > "$temporary"; then
+    rm -f "$temporary"
+    err "could not write mode file"
+    return 1
+  fi
+  if ! mv -f "$temporary" "$MODE_FILE"; then
+    rm -f "$temporary"
+    err "could not save mode in $MODE_FILE"
+    return 1
+  fi
 }
 
 symbol_for() {
@@ -178,7 +229,10 @@ apply_linux() {
     euro)   shifted="EuroSign" ;;
     dollar) shifted="dollar" ;;
   esac
-  xmodmap -e "keycode ${kc} = 4 ${shifted} 4 ${shifted}"
+  if ! xmodmap -e "keycode ${kc} = 4 ${shifted} 4 ${shifted}"; then
+    err "xmodmap could not apply the saved $mode mode"
+    return 1
+  fi
   ok "Shift+4 -> $(symbol_for "$mode")   keycode ${kc}"
 }
 
@@ -217,7 +271,20 @@ EOF
   cli="$(karabiner_cli)"
   if [ "$mode" = "euro" ]; then value=1; else value=0; fi
   if [ -n "$cli" ]; then
-    "$cli" --set-variables "{\"eurozone_enabled\":$value}" || err "Karabiner rejected the eurozone mode"
+    local attempt
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+      if "$cli" --set-variables "{\"eurozone_enabled\":$value}" >/dev/null 2>&1; then
+        break
+      fi
+      if [ "$attempt" -eq 10 ]; then
+        err "Karabiner did not accept the saved mode after 10 attempts"
+        return 1
+      fi
+      sleep 1
+    done
+  elif [ "$mode" = "euro" ]; then
+    err "karabiner_cli not found; install Karabiner-Elements to apply euro mode"
+    return 1
   fi
   if [ "$mode" = "euro" ]; then
     ok "wrote Karabiner rule  $dest"
@@ -231,8 +298,8 @@ apply_now() {
   local mode
   mode="$(read_mode)"
   case "$(os_family)" in
-    linux)   apply_linux "$mode" || true ;;
-    macos)   apply_macos "$mode" || true ;;
+    linux)   apply_linux "$mode" ;;
+    macos)   apply_macos "$mode" ;;
     windows) ok "use eurozone.cmd on Windows" ;;
     *)       ok "mode saved, no hook for this OS" ;;
   esac
@@ -258,10 +325,11 @@ show_doctor() {
       ;;
     macos)
       if [ -f "$MAC_LAUNCH_AGENT" ]; then ok "startup   registered"; else ok "startup   not registered"; fi
-      if [ -d "$HOME/.config/karabiner" ]; then
-        ok "karabiner config found"
+      cli="$(karabiner_cli)"
+      if [ -n "$cli" ]; then
+        ok "karabiner_cli  $cli"
       else
-        ok "karabiner not found"
+        ok "karabiner_cli  missing"
       fi
       ;;
   esac
@@ -303,14 +371,18 @@ show_menu() {
     choice="$(printf '%s' "$choice" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
     case "$choice" in
       1|e|euro)
-        write_mode euro
-        apply_now
-        LAST_MSG="applied euro"
+        if write_mode euro; then
+          if apply_now; then LAST_MSG="applied euro"; else LAST_MSG="saved euro; apply failed"; fi
+        else
+          LAST_MSG="could not save euro mode"
+        fi
         ;;
       2|d|dollar)
-        write_mode dollar
-        apply_now
-        LAST_MSG="applied dollar"
+        if write_mode dollar; then
+          if apply_now; then LAST_MSG="applied dollar"; else LAST_MSG="saved dollar; apply failed"; fi
+        else
+          LAST_MSG="could not save dollar mode"
+        fi
         ;;
       3)
         clear 2>/dev/null || true
@@ -344,11 +416,11 @@ fi
 
 case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
   1|euro|eur)
-    write_mode euro
+    write_mode euro || exit 1
     apply_now
     ;;
   2|dollar|usd)
-    write_mode dollar
+    write_mode dollar || exit 1
     apply_now
     ;;
   3)
