@@ -20,6 +20,7 @@ grep -q -- '--config-dir' "$XDG_CONFIG_HOME/autostart/eurozone.desktop"
 keymap="$(xkbcomp -xkb "$DISPLAY" -)"
 printf '%s\n' "$keymap" | awk '
   $1 == "key" && $2 == "<AE04>" { in_target=1 }
+  in_target { print }
   in_target && /EuroSign/ { found=1 }
   in_target && /};/ { in_target=0 }
   END { exit !found }
