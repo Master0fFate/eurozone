@@ -131,8 +131,21 @@ if grep -Eq '^(LANG|LANGUAGE|LC_MESSAGES|LC_ALL)=' "$environment_file"; then fai
 [ -f "$XDG_CONFIG_HOME/eurozone/profile.active" ] || fail 'no active state after setup'
 [ ! -e "$XDG_CONFIG_HOME/autostart" ] || fail 'regional setup installed keyboard startup'
 
+# A mid-apply error must undo this attempt, not undo the user's first baseline.
+cp "$environment_file" "$tmp/applied-environment"
+cp "$XDG_CONFIG_HOME/eurozone/profile.active" "$tmp/applied-active"
+if EZ_FAIL_KEY=clock-format run --profile FR > "$tmp/rollback.log" 2>&1; then fail 'write failure accepted'; fi
+[ "$(cat "$region_file")" = "'de_DE.UTF-8'" ] || fail 'failed switch changed region'
+[ "$(tr -d "'" < "$clock_file")" = 24h ] || fail 'failed switch changed clock'
+cmp "$tmp/applied-environment" "$environment_file"
+cmp "$tmp/applied-active" "$XDG_CONFIG_HOME/eurozone/profile.active"
+grep -q 'rollback completed' "$tmp/rollback.log"
+
 run --profile FR
 [ "$(cat "$region_file")" = "'fr_FR.UTF-8'" ] || fail 'profile switch failed'
+rm "$EZ_TEST_STATE/failed-once"
+if EZ_FAIL_KEY=region run --restore-profile > "$tmp/restore-failure.log" 2>&1; then fail 'failed restore reported success'; fi
+[ -f "$XDG_CONFIG_HOME/eurozone/profile-backup/ready" ] || fail 'failed restore lost backup'
 run --restore-profile
 [ "$(cat "$region_file")" = "'en_US.UTF-8'" ] || fail 'region not restored'
 [ "$(tr -d "'" < "$clock_file")" = 12h ] || fail 'clock not restored'
@@ -151,4 +164,33 @@ run --restore-profile
 if EZ_NO_GNOME=1 EZ_NO_SYSTEMD=1 run --setup DE > "$tmp/backend.log" 2>&1; then fail 'unsupported session accepted'; fi
 [ ! -e "$XDG_CONFIG_HOME/eurozone/profile.active" ] || fail 'unsupported session marked active'
 
-echo 'Isolated Unix CLI, preview, locale preflight, setup/switch/restore PASS'
+# systemd-only backend does not pretend to have changed desktop clock settings.
+printf 'LANG=en_US.UTF-8\nLC_MESSAGES=en_US.UTF-8\nLC_ALL=C\n' > "$environment_file"
+cp "$environment_file" "$tmp/systemd-before"
+EZ_NO_GNOME=1 run --setup DE > "$tmp/systemd.log" 2>&1
+grep -q '^LANG=en_US.UTF-8$' "$environment_file"
+grep -q '^LC_MESSAGES=en_US.UTF-8$' "$environment_file"
+grep -q '^LC_ALL=C$' "$environment_file"
+grep -q '^LC_MONETARY=de_DE.UTF-8$' "$environment_file"
+grep -q 'LC_ALL' "$tmp/systemd.log"
+EZ_NO_GNOME=1 run --restore-profile
+cmp "$tmp/systemd-before" "$environment_file"
+
+# v2 undo must restore its OLD hard-coded environment path, not the new XDG path.
+legacy="$XDG_CONFIG_HOME/eurozone/profile-backup"
+legacy_environment="$HOME/.config/environment.d/90-eurozone-profile.conf"
+mkdir -p "$legacy" "$(dirname "$legacy_environment")"
+printf 'present\n' > "$legacy/gnome-region-status"
+printf "'en_GB.UTF-8'\n" > "$legacy/gnome-region"
+printf 'present\n' > "$legacy/environment-status"
+printf 'LC_TIME=legacy-before\n' > "$legacy/environment.d"
+printf 'LC_TIME=legacy-applied\n' > "$legacy_environment"
+: > "$legacy/ready"
+reject --setup DE
+run --restore-profile
+[ "$(cat "$region_file")" = "'en_GB.UTF-8'" ] || fail 'legacy GNOME region not restored'
+[ "$(cat "$legacy_environment")" = 'LC_TIME=legacy-before' ] || fail 'legacy environment path not restored'
+cmp "$tmp/systemd-before" "$environment_file"
+[ ! -e "$legacy" ] || fail 'legacy backup not consumed'
+
+echo 'Isolated Unix CLI, locale preflight, setup/switch/restore, rollback and v2 migration PASS'

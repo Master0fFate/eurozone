@@ -39,9 +39,12 @@ as of 1 January 2026. Locale availability still depends on your OS.
 | 24-hour time | Explicit | Explicit | Locale; GNOME clock also set to 24h when supported |
 | Metric units | Explicit | Explicit | Locale measurement category |
 | Celsius | App-specific | Explicit | App-specific; metric locale is not a temperature switch |
-| A4 paper preference | Explicit | Explicit | Locale paper category |
+| A4 paper preference | Explicit | Country/printer default; verify in Print settings | Locale paper category |
 | Monday-first / ISO week rules | Explicit | Explicit | Locale; calendars can override it |
 | Gregorian calendar | Explicit | Explicit | Locale / application |
+
+Windows also sets the user's home country; undo restores it. macOS backs up
+and clears custom ICU date/time/number overrides so country formats can apply.
 
 **These are per-user preferences, not a forced conversion of every app.**
 Restart applications or sign out and back in after applying or restoring.
@@ -103,8 +106,9 @@ manual edits to the settings in that snapshot since setup.
 - Windows configuration: `%APPDATA%\eurozone`
 - Linux/macOS configuration: `$XDG_CONFIG_HOME/eurozone`, normally `~/.config/eurozone`
 
-Older v2 regional backups remain usable. They contain only the settings that
-v2 saved; they cannot reconstruct changes outside that snapshot.
+Older v2 regional backups remain usable. On Linux/macOS, restore that backup
+before applying a v3 setup. Old backups contain only the settings that v2
+saved; they cannot reconstruct changes outside that snapshot.
 
 ## Optional Shift+4 shortcut
 

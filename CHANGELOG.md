@@ -10,8 +10,10 @@
   preferences where the OS exposes them.
 - Windows: 24-hour time, metric units, A4, Monday-first weeks, ISO first-week
   rule, Gregorian calendar and two euro fractional digits.
-- macOS: euro locale, Gregorian calendar, metric units, Celsius, A4,
-  24-hour time and Monday/ISO week preferences.
+- macOS: euro locale, Gregorian calendar, metric units, Celsius,
+  24-hour time and Monday/ISO week preferences. Clear and back up custom ICU
+  format overrides. Paper size follows country/printer defaults; verify A4
+  in Print settings.
 - Linux: installed UTF-8 locale preflight, GNOME regional formats and 24-hour
   clock, plus per-user systemd locale categories when supported.
 - macOS double-click launcher: `eurozone.command`.
@@ -20,7 +22,8 @@
 
 - Correct Windows metric measurement to `iMeasure=0` (1 means US units).
 - Preserve language, input layout, and time zone.
-- Preserve the original undo point when switching countries.
+- Preserve the original undo point when switching countries. Allow v2 backups
+  to be restored before applying the new Linux/macOS setup.
 - Check backup and apply failures instead of claiming partial changes succeeded.
 - Reject unknown profiles and malformed CLI input without opening the menu.
 - Respect `XDG_CONFIG_HOME` for Linux `environment.d` settings.

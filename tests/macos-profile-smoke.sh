@@ -30,7 +30,7 @@ EOF
 chmod +x "$tmp/bin/karabiner_cli"
 export PATH="$tmp/bin:$PATH"
 
-keys=(AppleLocale AppleMetricUnits AppleMeasurementUnits AppleTemperatureUnit AppleICUForce24HourTime AppleICUForce12HourTime AppleFirstWeekday AppleMinDaysInFirstWeek)
+keys=(AppleLocale AppleMetricUnits AppleMeasurementUnits AppleTemperatureUnit AppleICUForce24HourTime AppleICUForce12HourTime AppleFirstWeekday AppleMinDaysInFirstWeek AppleICUDateFormatStrings AppleICUTimeFormatStrings AppleICUNumberFormatStrings AppleICUNumberSymbols)
 state() {
   local key
   for key in "${keys[@]}"; do
@@ -47,13 +47,16 @@ defaults delete -g AppleICUForce24HourTime >/dev/null 2>&1 || true
 defaults write -g AppleICUForce12HourTime -bool true
 defaults write -g AppleFirstWeekday -dict gregorian 1 buddhist 3
 defaults write -g AppleMinDaysInFirstWeek -dict gregorian 1 buddhist 2
+defaults write -g AppleICUDateFormatStrings -dict 1 'MM/dd/yyyy'
+defaults write -g AppleICUTimeFormatStrings -dict 1 'h:mm a'
+defaults write -g AppleICUNumberSymbols -dict 0 '.' 1 ','
 state > "$tmp/before"
 
 bash "$repo_root/eurozone" --preview DE
 [ ! -e "$XDG_CONFIG_HOME" ]
 bash "$repo_root/eurozone" --setup
 actual="$(defaults read -g AppleLocale)"
-[[ "$actual" == en_IE@*currency=EUR* ]]
+[[ "$actual" == en_IE@*calendar=gregorian*currency=EUR* ]]
 [ "$(defaults read -g AppleMetricUnits)" = 1 ]
 [ "$(defaults read -g AppleMeasurementUnits)" = Centimeters ]
 [ "$(defaults read -g AppleTemperatureUnit)" = Celsius ]
@@ -63,6 +66,9 @@ defaults export -g "$tmp/applied.plist"
 [ "$(plutil -extract AppleFirstWeekday.gregorian raw -o - "$tmp/applied.plist")" = 2 ]
 [ "$(plutil -extract AppleMinDaysInFirstWeek.gregorian raw -o - "$tmp/applied.plist")" = 4 ]
 [ "$(plutil -extract AppleFirstWeekday.buddhist raw -o - "$tmp/applied.plist")" = 3 ]
+for key in AppleICUDateFormatStrings AppleICUTimeFormatStrings AppleICUNumberFormatStrings AppleICUNumberSymbols; do
+  if defaults read -g "$key" >/dev/null 2>&1; then echo "Custom format still overrides profile: $key" >&2; exit 1; fi
+done
 [ -f "$XDG_CONFIG_HOME/eurozone/profile.active" ]
 [ ! -e "$HOME/Library/LaunchAgents/com.eurozone.startup.plist" ]
 
@@ -72,6 +78,17 @@ bash "$repo_root/eurozone" --restore-profile
 state > "$tmp/after"
 cmp "$tmp/before" "$tmp/after"
 [ ! -e "$XDG_CONFIG_HOME/eurozone/profile.active" ]
+
+# A v2 backup can still undo its smaller scope before a new setup.
+legacy="$XDG_CONFIG_HOME/eurozone/profile-backup"
+mkdir -p "$legacy"
+printf 'present\n' > "$legacy/apple-locale-status"
+printf 'en_US\n' > "$legacy/apple-locale"
+: > "$legacy/ready"
+if bash "$repo_root/eurozone" --setup DE; then echo 'Applied v3 over a v2 backup' >&2; exit 1; fi
+bash "$repo_root/eurozone" --restore-profile
+[ "$(defaults read -g AppleLocale)" = en_US ]
+[ ! -e "$legacy" ]
 
 # Stub checks our payload, not a live Karabiner install or non-US input layout.
 bash "$repo_root/eurozone" euro >/dev/null

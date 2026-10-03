@@ -212,7 +212,10 @@ list_region_profiles() {
 # Only these global keys are changed. Do not back up/restore an entire domain:
 # doing so would clobber unrelated preferences changed since setup.
 MAC_REGION_KEYS=(AppleLocale AppleMetricUnits AppleMeasurementUnits AppleTemperatureUnit
-  AppleICUForce24HourTime AppleICUForce12HourTime AppleFirstWeekday AppleMinDaysInFirstWeek)
+  AppleICUForce24HourTime AppleICUForce12HourTime AppleFirstWeekday AppleMinDaysInFirstWeek
+  AppleICUDateFormatStrings AppleICUTimeFormatStrings AppleICUNumberFormatStrings AppleICUNumberSymbols)
+MAC_FORMAT_OVERRIDE_KEYS=(AppleICUDateFormatStrings AppleICUTimeFormatStrings
+  AppleICUNumberFormatStrings AppleICUNumberSymbols)
 PROFILE_ID="" PROFILE_NAME="" PROFILE_CULTURE="" POSIX_LOCALE=""
 GNOME_REGION=0 GNOME_CLOCK=0 SYSTEMD_ENV=0
 LOCALE_CATEGORIES=(LC_NUMERIC LC_MONETARY LC_TIME LC_MEASUREMENT LC_PAPER)
@@ -304,7 +307,8 @@ preview_region_profile() {
   case "$(os_family)" in
     macos)
       printf '  macOS global preferences (typed):\n'
-      printf '    AppleLocale = %s@currency=EUR (string; ICU-aware apps)\n' "${PROFILE_CULTURE//-/_}"
+      printf '    AppleLocale = %s@calendar=gregorian;currency=EUR (string; ICU-aware apps)\n' "${PROFILE_CULTURE//-/_}"
+      printf '    Custom ICU date/time/number overrides are backed up and cleared for country defaults.\n'
       printf '    AppleMetricUnits = true (boolean); AppleMeasurementUnits = Centimeters (string)\n'
       printf '    AppleTemperatureUnit = Celsius (string)\n'
       printf '    AppleICUForce24HourTime = true; AppleICUForce12HourTime = false (booleans)\n'
@@ -526,10 +530,10 @@ mac_write_week_rule() {
 }
 
 mac_verify_applied() {
-  local temporary failed=0
+  local temporary key failed=0
   temporary="$(mktemp "$CONF_DIR/.region-check.XXXXXX")" || return 1
   if ! defaults export -g "$temporary" >/dev/null 2>&1; then rm -f "$temporary"; return 1; fi
-  mac_value_is "$temporary" AppleLocale "<string>${PROFILE_CULTURE//-/_}@currency=EUR</string>" &&
+  mac_value_is "$temporary" AppleLocale "<string>${PROFILE_CULTURE//-/_}@calendar=gregorian;currency=EUR</string>" &&
     mac_value_is "$temporary" AppleMetricUnits '<true/>' &&
     mac_value_is "$temporary" AppleMeasurementUnits '<string>Centimeters</string>' &&
     mac_value_is "$temporary" AppleTemperatureUnit '<string>Celsius</string>' &&
@@ -537,6 +541,9 @@ mac_verify_applied() {
     mac_value_is "$temporary" AppleICUForce12HourTime '<false/>' &&
     mac_value_is "$temporary" AppleFirstWeekday.gregorian '<integer>2</integer>' &&
     mac_value_is "$temporary" AppleMinDaysInFirstWeek.gregorian '<integer>4</integer>' || failed=1
+  for key in "${MAC_FORMAT_OVERRIDE_KEYS[@]}"; do
+    if plutil -extract "$key" xml1 -o - "$temporary" >/dev/null 2>&1; then failed=1; fi
+  done
   rm -f "$temporary"
   [ "$failed" -eq 0 ]
 }
@@ -546,7 +553,15 @@ mac_value_is() {
 }
 
 apply_macos_region_profile() {
-  defaults write -g AppleLocale -string "${PROFILE_CULTURE//-/_}@currency=EUR" &&
+  local key
+  # Existing custom patterns otherwise take priority over the selected locale.
+  # All values, including their absence and types, are already in the snapshot.
+  for key in "${MAC_FORMAT_OVERRIDE_KEYS[@]}"; do
+    if defaults read-type -g "$key" >/dev/null 2>&1; then
+      defaults delete -g "$key" || return 1
+    fi
+  done
+  defaults write -g AppleLocale -string "${PROFILE_CULTURE//-/_}@calendar=gregorian;currency=EUR" &&
     defaults write -g AppleMetricUnits -bool true &&
     defaults write -g AppleMeasurementUnits -string Centimeters &&
     defaults write -g AppleTemperatureUnit -string Celsius &&
@@ -594,7 +609,7 @@ apply_region_profile() {
   if [ -e "$PROFILE_BACKUP_DIR" ]; then
     [ -f "$PROFILE_BACKUP_DIR/ready" ] && [ "$(cat "$PROFILE_BACKUP_DIR/version" 2>/dev/null)" = 3 ] &&
       [ "$(cat "$PROFILE_BACKUP_DIR/os" 2>/dev/null)" = "$(os_family)" ] || {
-        err "existing backup is incompatible/incomplete; retained without changing settings"; return 1;
+        err "existing backup is incompatible/incomplete or from v2; use --restore-profile before setup; backup retained"; return 1;
       }
     if [ "$(os_family)" = linux ]; then
       if { [ "$GNOME_REGION" -eq 1 ] && [ "$(cat "$PROFILE_BACKUP_DIR/gnome-region-status")" != 1 ]; } ||
@@ -657,9 +672,65 @@ apply_region_profile() {
   fi
 }
 
+restore_legacy_region_profile() {
+  local source="$PROFILE_BACKUP_DIR" status environment_status value verification
+  # v2 had no version marker and touched only AppleLocale, or GNOME region and
+  # the hard-coded ~/.config environment file. Do not guess new values from it.
+  case "$(os_family)" in
+    macos)
+      [ ! -e "$source/gnome-region-status" ] || return 1
+      status="$(cat "$source/apple-locale-status" 2>/dev/null)" || return 1
+      case "$status" in
+        present)
+          value="$(cat "$source/apple-locale")" || return 1
+          defaults write -g AppleLocale -string "$value" &&
+            [ "$(defaults read -g AppleLocale)" = "$value" ] || return 1 ;;
+        missing)
+          if defaults read-type -g AppleLocale >/dev/null 2>&1; then
+            defaults delete -g AppleLocale || return 1
+          fi
+          verification="$(mktemp "$CONF_DIR/.legacy-check.XXXXXX")" || return 1
+          if ! defaults export -g "$verification" >/dev/null 2>&1 ||
+              ! plutil -lint "$verification" >/dev/null 2>&1; then
+            rm -f "$verification"; return 1
+          fi
+          if plutil -extract AppleLocale xml1 -o - "$verification" >/dev/null 2>&1; then
+            rm -f "$verification"; return 1
+          fi
+          rm -f "$verification" ;;
+        *) return 1 ;;
+      esac ;;
+    linux)
+      [ ! -e "$source/apple-locale-status" ] || return 1
+      status="$(cat "$source/gnome-region-status" 2>/dev/null)" || return 1
+      environment_status="$(cat "$source/environment-status" 2>/dev/null)" || return 1
+      case "$environment_status" in
+        present) [ -f "$source/environment.d" ] || return 1 ;;
+        missing) ;;
+        *) return 1 ;;
+      esac
+      case "$status" in
+        present)
+          value="$(cat "$source/gnome-region")" || return 1
+          gsettings set org.gnome.system.locale region "$value" &&
+            [ "$(gsettings get org.gnome.system.locale region)" = "$value" ] || return 1 ;;
+        unavailable) ;;
+        *) return 1 ;;
+      esac
+      restore_saved_file "$environment_status" "$source/environment.d" \
+        "$HOME/.config/environment.d/90-eurozone-profile.conf" || return 1 ;;
+    *) return 1 ;;
+  esac
+  rm -f "$PROFILE_ACTIVE_FILE"
+}
+
 restore_region_profile() {
   [ -f "$PROFILE_BACKUP_DIR/ready" ] || { err "no saved regional settings to restore"; return 1; }
-  restore_region_snapshot "$PROFILE_BACKUP_DIR" || return 1
+  if [ ! -e "$PROFILE_BACKUP_DIR/version" ]; then
+    restore_legacy_region_profile || { err "legacy restore failed or backup is invalid; backup retained"; return 1; }
+  else
+    restore_region_snapshot "$PROFILE_BACKUP_DIR" || return 1
+  fi
   rm -rf "$PROFILE_BACKUP_DIR" || { err "settings restored, but backup cleanup failed"; return 1; }
   ok "previous regional settings restored; restart apps or sign in again if needed"
 }
@@ -915,6 +986,8 @@ show_menu() {
       printf '%s\n' "  ${EZ_BLUE}${LAST_MSG}${EZ_RST}"
     fi
     printf '\n'
+    printf '  7  European setup (recommended; Enter default)\n'
+    printf '     country formats, euro, time and unit preferences\n\n'
     if [ "$mode" = "euro" ]; then
       printf '  1  euro     Shift+4 becomes €  [active]\n'
     else
@@ -929,7 +1002,6 @@ show_menu() {
     printf '  4  quit\n'
     printf '  5  country / regional format profile\n'
     printf '  6  restore previous regional settings\n'
-    printf '  7  European setup (recommended; Enter default)\n'
     printf '\n'
     printf '  '
     if ! read -r choice; then
