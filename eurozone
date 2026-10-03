@@ -579,8 +579,10 @@ apply_linux_region_profile() {
   if ! (
     # Keep unrelated assignments, especially an existing LANG/LC_MESSAGES.
     if [ -f "$PROFILE_ENV_FILE" ]; then
-      awk -v categories="${LOCALE_CATEGORIES[*]}" '
-        BEGIN { count=split(categories, keys, "\n"); for (i=1; i<=count; i++) remove[keys[i]]=1 }
+      # BSD awk rejects literal newlines in -v strings. Category names contain
+      # no spaces, so a space-delimited list works with both BSD and GNU awk.
+      awk -v categories="$(IFS=' '; printf '%s' "${LOCALE_CATEGORIES[*]}")" '
+        BEGIN { count=split(categories, keys, " "); for (i=1; i<=count; i++) remove[keys[i]]=1 }
         /^# eurozone: regional categories only; preserve LANG and LC_MESSAGES\.$/ { next }
         { key=$0; sub(/^[ \t]*/, "", key); sub(/[ \t]*=.*/, "", key); if (!(key in remove)) print }
       ' "$PROFILE_ENV_FILE" || exit 1
