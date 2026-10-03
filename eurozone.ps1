@@ -1,28 +1,54 @@
-# eurozone — Shift+4  $ / €
+﻿# eurozone — Shift+4  $ / €
 # Windows PowerShell 5.1 + 7. Menu stays open. Regional profiles are per-user.
 # Built-in RegisterHotKey hook. AutoHotkey optional.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$Version = "2.0.0"
+$Version = "3.0.0"
 
 # Startup may pass the user's paths explicitly so the installed copy uses the
 # same per-user profile and region settings as the menu.
 $script:UserArgs = New-Object 'System.Collections.Generic.List[string]'
 $script:ConfigDirOverride = $null
 $script:InstallDirOverride = $null
-for ($i = 0; $i -lt $args.Count; $i++) {
-    switch ([string]$args[$i]) {
-        "--config-dir" {
-            if ($i + 1 -lt $args.Count) { $script:ConfigDirOverride = [string]$args[++$i] }
-        }
-        "--install-dir" {
-            if ($i + 1 -lt $args.Count) { $script:InstallDirOverride = [string]$args[++$i] }
-        }
-        default { [void]$script:UserArgs.Add([string]$args[$i]) }
+# Validate the entire command before creating directories or touching settings.
+try {
+    for ($i = 0; $i -lt $args.Count; $i++) {
+        $arg = [string]$args[$i]
+        if ($arg -in @('--config-dir', '--install-dir')) {
+            if ($i + 1 -ge $args.Count -or [string]::IsNullOrWhiteSpace([string]$args[$i + 1]) -or
+                ([string]$args[$i + 1]).StartsWith('--')) { throw "missing path for $arg" }
+            $value = [string]$args[++$i]
+            if ($arg -eq '--config-dir') {
+                if ($script:ConfigDirOverride) { throw 'duplicate --config-dir' }
+                $script:ConfigDirOverride = $value
+            } else {
+                if ($script:InstallDirOverride) { throw 'duplicate --install-dir' }
+                $script:InstallDirOverride = $value
+            }
+        } else { [void]$script:UserArgs.Add($arg) }
     }
-}
+    $allArgs = @($script:UserArgs.ToArray())
+    $cmd = if ($allArgs.Count) { $allArgs[0].ToLowerInvariant() } else { '' }
+    if ($allArgs.Count -gt 0 -and [string]::IsNullOrWhiteSpace($cmd)) { throw 'empty command; use --help' }
+    switch ($cmd) {
+        '--profile' { if ($allArgs.Count -ne 2) { throw '--profile requires exactly one profile ID' } }
+        { $_ -in @('--setup', '--preview') } {
+            if ($allArgs.Count -gt 2) { throw "$cmd accepts at most one profile ID" }
+        }
+        { $_ -in @('', '--help', '-h', '--list-profiles', '--restore-profile', '--hook', '--startup',
+                '1', 'euro', 'eur', '2', 'dollar', 'usd', '3', '4', 'quit') } {
+            if ($allArgs.Count -gt 1) { throw "unexpected arguments after $cmd" }
+        }
+        default { throw "unknown command '$cmd'; use --help" }
+    }
+    if ($cmd -in @('--profile', '--setup', '--preview') -and $allArgs.Count -eq 2) {
+        if ([string]::IsNullOrWhiteSpace($allArgs[1]) -or $allArgs[1].StartsWith('-')) {
+            throw "invalid profile ID; use --list-profiles"
+        }
+    }
+} catch { Write-Host ("argument error: " + $_.Exception.Message); exit 2 }
 
 $ConfDir = if ($script:ConfigDirOverride) { $script:ConfigDirOverride } else { Join-Path $env:APPDATA "eurozone" }
 $ModeFile = Join-Path $ConfDir "mode"
@@ -39,8 +65,10 @@ $RunValue = "eurozone"
 $WindowsPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $script:StartupError = $null
 
-if (-not (Test-Path $ConfDir)) {
-    New-Item -ItemType Directory -Path $ConfDir | Out-Null
+function Initialize-EzConfig {
+    if (-not (Test-Path -LiteralPath $ConfDir)) {
+        New-Item -ItemType Directory -Path $ConfDir -Force | Out-Null
+    }
 }
 
 function Test-EzAdmin {
@@ -91,6 +119,7 @@ function Get-Mode {
 }
 
 function Set-Mode([string]$Mode) {
+    Initialize-EzConfig
     $temporary = Join-Path $ConfDir (".mode." + [Guid]::NewGuid().ToString("N"))
     $backup = $temporary + ".bak"
     [IO.File]::WriteAllText($temporary, ($Mode + "`r`n"), [Text.Encoding]::ASCII)
@@ -137,79 +166,227 @@ function Show-RegionProfiles {
 }
 
 function Save-ProfileActive([string]$ProfileId, [string]$Culture) {
-    $temporary = $ProfileActiveFile + ".tmp"
-    $backup = $temporary + ".bak"
-    [IO.File]::WriteAllText($temporary, ("{0}|{1}`r`n" -f $ProfileId, $Culture), [Text.Encoding]::ASCII)
+    $temporary = $ProfileActiveFile + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+    $backup = $temporary + '.bak'
     try {
+        [IO.File]::WriteAllText($temporary, ("{0}|{1}`r`n" -f $ProfileId, $Culture), [Text.Encoding]::ASCII)
         if ([IO.File]::Exists($ProfileActiveFile)) {
             [IO.File]::Replace($temporary, $ProfileActiveFile, $backup)
         } else {
             [IO.File]::Move($temporary, $ProfileActiveFile)
         }
     } finally {
-        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
-        if ([IO.File]::Exists($backup)) { [IO.File]::Delete($backup) }
+        # Cleanup must not turn a committed metadata write into a failed apply.
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Get-RegionPlan([string]$Identifier = 'IE-EN') {
+    $profile = Get-RegionProfile $Identifier
+    # Ignore the current user's overrides: presets must be reproducible.
+    $culture = [Globalization.CultureInfo]::new($profile.culture, $false)
+    $calendar = @($culture.OptionalCalendars | Where-Object { $_ -is [Globalization.GregorianCalendar] })[0]
+    if (-not $calendar) { throw "Gregorian calendar is unavailable for $($profile.culture)" }
+    $culture.DateTimeFormat.Calendar = $calendar
+    $culture.DateTimeFormat.FirstDayOfWeek = [DayOfWeek]::Monday
+    $culture.DateTimeFormat.CalendarWeekRule = [Globalization.CalendarWeekRule]::FirstFourDayWeek
+    $culture.DateTimeFormat.TimeSeparator = ':'
+    $culture.DateTimeFormat.ShortTimePattern = 'HH:mm'
+    $culture.DateTimeFormat.LongTimePattern = 'HH:mm:ss'
+    $culture.NumberFormat.CurrencySymbol = [string][char]0x20AC
+    $culture.NumberFormat.CurrencyDecimalDigits = 2
+    $region = [Globalization.RegionInfo]::new($culture.Name)
+    if ($region.GeoId -le 0) { throw "Windows has no supported home-country ID for $($culture.Name)" }
+    $number = $culture.NumberFormat
+    $date = $culture.DateTimeFormat
+    # Windows grouping strings have a terminal zero (repeat the last group).
+    $numberGroups = ($number.NumberGroupSizes -join ';')
+    if ($number.NumberGroupSizes[-1] -ne 0) { $numberGroups += ';0' }
+    $moneyGroups = ($number.CurrencyGroupSizes -join ';')
+    if ($number.CurrencyGroupSizes[-1] -ne 0) { $moneyGroups += ';0' }
+    $values = [ordered]@{
+        sDecimal = $number.NumberDecimalSeparator
+        sThousand = $number.NumberGroupSeparator
+        sGrouping = $numberGroups
+        iDigits = [string]$number.NumberDecimalDigits
+        iNegNumber = [string]$number.NumberNegativePattern
+        sNegativeSign = $number.NegativeSign
+        sPositiveSign = $number.PositiveSign
+        sCurrency = [string][char]0x20AC
+        sMonDecimalSep = $number.CurrencyDecimalSeparator
+        sMonThousandSep = $number.CurrencyGroupSeparator
+        sMonGrouping = $moneyGroups
+        iCurrency = [string]$number.CurrencyPositivePattern
+        iNegCurr = [string]$number.CurrencyNegativePattern
+        iCurrDigits = '2'
+        iIntlCurrDigits = '2'
+        sShortDate = $date.ShortDatePattern
+        sLongDate = $date.LongDatePattern
+        sYearMonth = $date.YearMonthPattern
+        sDate = $date.DateSeparator
+        sTime = ':'
+        sShortTime = 'HH:mm'
+        sTimeFormat = 'HH:mm:ss'
+        iTime = '1'
+        iTimePrefix = '0'
+        iTLZero = '1'
+        iMeasure = '0'
+        iFirstDayOfWeek = '0'
+        iFirstWeekOfYear = '2'
+        iCalendarType = [string][int]$calendar.CalendarType
+        iPaperSize = '9'
+    }
+    return [pscustomobject]@{ Profile = $profile; Culture = $culture; Region = $region; Values = $values }
+}
+
+function Show-RegionPreview([string]$Identifier = 'IE-EN') {
+    $plan = Get-RegionPlan $Identifier
+    $sample = [datetime]::new(2026, 12, 31, 17, 45, 30)
+    Write-Host ("  European setup: {0} ({1})" -f $plan.Profile.name, $plan.Culture.Name)
+    Write-Host ("  Date     {0} | {1}" -f $sample.ToString('d', $plan.Culture), $sample.ToString('D', $plan.Culture))
+    Write-Host ("  Time     {0} | {1} (24-hour)" -f $sample.ToString('t', $plan.Culture), $sample.ToString('T', $plan.Culture))
+    Write-Host ("  Number   {0}" -f (1234567.89).ToString('N', $plan.Culture))
+    Write-Host ("  Currency {0} | {1} (EUR symbol, two decimals)" -f (1234567.89).ToString('C', $plan.Culture), (-1234.56).ToString('C', $plan.Culture))
+    Write-Host ("  Patterns date={0}; time=HH:mm / HH:mm:ss" -f $plan.Values.sShortDate)
+    Write-Host '  Metric; Monday first; ISO first week (four-day rule); Gregorian; A4 paper.'
+    Write-Host ("  Home country: {0} (GeoID {1}). Current Windows user only." -f $plan.Region.EnglishName, $plan.Region.GeoId)
+    Write-Host '  Unchanged: display language, input layouts, Shift+4, startup, time zone, system/admin settings.'
+    Write-Host '  Celsius: Windows has no supported global preference; choose Celsius in each app.'
+    Write-Host '  Apps/printer drivers may override formats, week rules or paper size; restart apps/sign out as needed.'
+    if ($plan.Region.ISOCurrencySymbol -ne 'EUR') {
+        Write-Host ("  Windows locale metadata still reports {0}; EUR symbol is forced, not the OS ISO currency code." -f $plan.Region.ISOCurrencySymbol)
+    }
+    Write-Host '  Preview is read-only. Apply saves the original regional registry (including home country) for restore.'
+}
+
+function Export-RegionSnapshot([string]$Path) {
+    $temporary = $Path + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+    try {
+        $regExe = Join-Path $env:SystemRoot 'System32\reg.exe'
+        & $regExe export $InternationalRegistryKey $temporary /y | Out-Null
+        if ($LASTEXITCODE -ne 0 -or -not [IO.File]::Exists($temporary)) {
+            throw 'could not back up the current Windows regional registry; nothing was applied'
+        }
+        # Never overwrite the original baseline, even when switching profiles.
+        [IO.File]::Move($temporary, $Path)
+    } finally {
+        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+    }
+}
+
+function Import-RegionSnapshot([string]$Path) {
+    if (-not [IO.File]::Exists($Path)) { throw "regional snapshot missing: $Path" }
+    # Import alone merges values and leaves newly added keys behind. Replacing
+    # this entire per-user tree restores value types, subkeys and absent values.
+    if (Test-Path -LiteralPath $InternationalKey) {
+        Remove-Item -LiteralPath $InternationalKey -Recurse -Force
+    }
+    $regExe = Join-Path $env:SystemRoot 'System32\reg.exe'
+    & $regExe import $Path | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "could not import regional snapshot: $Path" }
+}
+
+function Undo-RegionFailure([string]$Snapshot, [string]$Failure) {
+    try { Import-RegionSnapshot $Snapshot }
+    catch {
+        throw ("{0}; ROLLBACK FAILED: {1}. Settings may be partial. Recovery snapshot retained at {2}; original backup at {3}" -f
+            $Failure, $_.Exception.Message, $Snapshot, $ProfileBackupFile)
+    }
+    Remove-Item -LiteralPath $Snapshot -Force -ErrorAction SilentlyContinue
+    throw "$Failure; previous regional registry recovered. Restart apps/sign out to refresh cached formats."
 }
 
 function Set-RegionProfile([string]$Identifier) {
-    $profile = Get-RegionProfile $Identifier
-    if (-not [IO.File]::Exists($ProfileBackupFile)) {
-        $regExe = Join-Path $env:SystemRoot "System32\reg.exe"
-        & $regExe export $InternationalRegistryKey $ProfileBackupFile /y | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "could not back up the current Windows regional settings" }
+    $plan = Get-RegionPlan $Identifier
+    # Fail before any settings writes on hosts missing the per-user Windows API.
+    $null = Get-Command Set-Culture -ErrorAction Stop
+    $null = Get-Command Set-WinHomeLocation -ErrorAction Stop
+    Initialize-EzConfig
+    $currentSnapshot = Join-Path $ConfDir ('.profile-current.' + [Guid]::NewGuid().ToString('N') + '.reg')
+    Export-RegionSnapshot $currentSnapshot
+    try {
+        if (-not [IO.File]::Exists($ProfileBackupFile)) {
+            # Copy an already completed snapshot; publish atomically.
+            $temporary = $ProfileBackupFile + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+            try {
+                [IO.File]::Copy($currentSnapshot, $temporary)
+                [IO.File]::Move($temporary, $ProfileBackupFile)
+            } finally {
+                if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+            }
+        }
+    } catch {
+        Remove-Item -LiteralPath $currentSnapshot -Force -ErrorAction SilentlyContinue
+        throw
     }
-    $culture = [Globalization.CultureInfo]::GetCultureInfo($profile.culture)
-    Set-Culture -CultureInfo $culture
-    New-ItemProperty -LiteralPath $InternationalKey -Name sCurrency -Value ([string][char]0x20AC) -PropertyType String -Force | Out-Null
-    New-ItemProperty -LiteralPath $InternationalKey -Name iMeasure -Value "1" -PropertyType String -Force | Out-Null
-    Save-ProfileActive $profile.id $profile.culture
-    $region = [Globalization.RegionInfo]::new($culture.Name)
-    Write-Ok ("regional profile applied: {0} ({1})" -f $profile.name, $culture.Name)
-    if ($region.ISOCurrencySymbol -ne "EUR") {
-        Write-Host ("  WARNING  Windows locale data reports {0}; update Windows for current ISO currency data." -f $region.ISOCurrencySymbol)
+    try {
+        Set-Culture -CultureInfo $plan.Culture
+        foreach ($name in $plan.Values.Keys) {
+            New-ItemProperty -LiteralPath $InternationalKey -Name $name -Value $plan.Values[$name] -PropertyType String -Force | Out-Null
+        }
+        Set-WinHomeLocation -GeoId $plan.Region.GeoId
+        foreach ($name in $plan.Values.Keys) {
+            $actual = Get-ItemPropertyValue -LiteralPath $InternationalKey -Name $name
+            if ([string]$actual -cne [string]$plan.Values[$name]) { throw "regional setting verification failed: $name" }
+        }
+        $locale = Get-ItemPropertyValue -LiteralPath $InternationalKey -Name LocaleName
+        if ($locale -ne $plan.Culture.Name) { throw 'regional culture verification failed' }
+        $nation = Get-ItemPropertyValue -LiteralPath (Join-Path $InternationalKey 'Geo') -Name Nation
+        if ([string]$nation -ne [string]$plan.Region.GeoId) { throw 'home country verification failed' }
+        Save-ProfileActive $plan.Profile.id $plan.Culture.Name
+    } catch { Undo-RegionFailure $currentSnapshot $_.Exception.Message }
+    Remove-Item -LiteralPath $currentSnapshot -Force -ErrorAction SilentlyContinue
+    Write-Ok ("European setup applied: {0} ({1})" -f $plan.Profile.name, $plan.Culture.Name)
+    Write-Ok 'EUR symbol, two decimals; country date/number formats; 24-hour time; metric; Monday/ISO week; Gregorian; A4; home country'
+    Write-Ok 'display language, input layouts, keyboard hook, startup and time zone were not changed'
+    Write-Ok 'Celsius must be selected per app; apps/printers may override regional defaults'
+    if ($plan.Region.ISOCurrencySymbol -ne 'EUR') {
+        Write-Host ("  WARNING: Windows locale metadata reports {0}; EUR symbol is forced, not the OS ISO currency code." -f $plan.Region.ISOCurrencySymbol)
     }
-    Write-Ok "currency symbol set to euro; metric measurement enabled"
-    Write-Ok "interface language, keyboard layout and time zone were not changed"
-    Write-Ok "restart apps or sign out and back in if formats do not update"
+    Write-Ok 'restart apps or sign out and back in if formats do not update'
 }
 
 function Restore-RegionProfile {
-    if (-not [IO.File]::Exists($ProfileBackupFile)) {
-        throw "no saved Windows regional settings to restore"
-    }
-    $currentSnapshot = Join-Path $ConfDir ".profile-current.reg"
-    $regExe = Join-Path $env:SystemRoot "System32\reg.exe"
-    & $regExe export $InternationalRegistryKey $currentSnapshot /y | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "could not protect the current regional settings before restore" }
-    Remove-Item -LiteralPath $InternationalKey -Recurse -Force
-    & $regExe import $ProfileBackupFile | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        & $regExe import $currentSnapshot | Out-Null
-        throw "could not restore the saved regional settings; current settings were recovered"
+    if (-not [IO.File]::Exists($ProfileBackupFile)) { throw 'no saved Windows regional settings to restore' }
+    $currentSnapshot = Join-Path $ConfDir ('.profile-current.' + [Guid]::NewGuid().ToString('N') + '.reg')
+    Export-RegionSnapshot $currentSnapshot
+    $hadActive = [IO.File]::Exists($ProfileActiveFile)
+    $active = if ($hadActive) { ,([IO.File]::ReadAllBytes($ProfileActiveFile)) } else { $null }
+    try {
+        Import-RegionSnapshot $ProfileBackupFile
+        if ([IO.File]::Exists($ProfileActiveFile)) { [IO.File]::Delete($ProfileActiveFile) }
+        # Consume the original backup only after the complete import succeeds.
+        [IO.File]::Delete($ProfileBackupFile)
+    } catch {
+        $failure = $_.Exception.Message
+        if ($hadActive) {
+            try { [IO.File]::WriteAllBytes($ProfileActiveFile, [byte[]]$active) }
+            catch { $failure += '; active-profile metadata could not be recovered: ' + $_.Exception.Message }
+        }
+        Undo-RegionFailure $currentSnapshot $failure
     }
     Remove-Item -LiteralPath $currentSnapshot -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $ProfileBackupFile -Force
-    Remove-Item -LiteralPath $ProfileActiveFile -Force -ErrorAction SilentlyContinue
-    Write-Ok "previous Windows regional settings restored"
-    Write-Ok "restart apps or sign out and back in if formats do not update"
+    Write-Ok 'previous Windows regional registry and home country restored (including removal of added values/keys)'
+    Write-Ok 'restart apps or sign out and back in if formats do not update'
 }
 
 function Select-RegionProfile {
     try {
         Show-RegionProfiles
-        $choice = Read-Host "  enter a profile ID or locale code"
+        $choice = (Read-Host '  country/profile ID [IE-EN]').Trim()
+        if (-not $choice) { $choice = 'IE-EN' }
         $profile = Get-RegionProfile $choice
-        Write-Host ("  Preview: set regional formats to {0} ({1}). Keep display language, keyboard and time zone." -f $profile.name, $profile.culture)
-        $confirm = Read-Host "  apply these settings? [y/N]"
-        if ($confirm -notmatch '^(y|yes)$') {
-            Write-Ok "no regional settings changed"
+        Show-RegionPreview $profile.id
+        $confirm = Read-Host '  apply European setup? [y/N]'
+        if ($confirm.Trim() -notmatch '^(y|yes)$') {
+            Write-Ok 'no regional settings changed'
             return $false
         }
         Set-RegionProfile $profile.id
         return $true
     } catch {
-        Write-Ez ("profile failed: " + $_.Exception.Message) Red
+        Write-Ez ('setup failed: ' + $_.Exception.Message) Red
         return $false
     }
 }
@@ -229,7 +406,10 @@ function Install-EzStartup {
         if (-not $source.Equals($destination, [StringComparison]::OrdinalIgnoreCase)) {
             Copy-Item -LiteralPath $source -Destination $destination -Force
         }
-        Copy-Item -LiteralPath $ProfileCatalog -Destination (Join-Path $InstallDir "eurozone-profiles.tsv") -Force
+        $catalogDestination = [IO.Path]::GetFullPath((Join-Path $InstallDir 'eurozone-profiles.tsv'))
+        if (-not ([IO.Path]::GetFullPath($ProfileCatalog)).Equals($catalogDestination, [StringComparison]::OrdinalIgnoreCase)) {
+            Copy-Item -LiteralPath $ProfileCatalog -Destination $catalogDestination -Force
+        }
         if (-not (Test-Path $RunKey)) {
             New-Item -Path $RunKey -Force | Out-Null
         }
@@ -278,12 +458,21 @@ function Stop-EzHook {
 }
 
 function Start-EzHook {
+    Initialize-EzConfig
     Stop-EzHook
     $self = $PSCommandPath
     $arg = ('-NoProfile -STA -ExecutionPolicy Bypass -File "{0}" --hook --config-dir "{1}" --install-dir "{2}"' -f `
         $self, $ConfDir, $InstallDir)
     $p = Start-Process -FilePath "powershell.exe" -PassThru -WindowStyle Hidden -ArgumentList $arg
     Set-Content -Path $PidFile -Value ([string]$p.Id) -Encoding ASCII
+}
+
+function Set-KeyboardMode([string]$Mode) {
+    Set-Mode $Mode
+    if (-not (Install-EzStartup)) {
+        throw ("keyboard startup installation failed: " + $script:StartupError)
+    }
+    Invoke-Apply
 }
 
 function Invoke-Apply {
@@ -341,6 +530,9 @@ function Show-Menu {
         $a2 = ""
         if ($mode -eq "euro") { $a1 = "  [active]" }
         if ($mode -eq "dollar") { $a2 = "  [active]" }
+        Write-Ez '  7  European setup (recommended; Enter default)'
+        Write-Host '     country formats, EUR, 24h, metric, Monday/ISO week, Gregorian, A4'
+        Write-Host ''
         Write-Host ("  1  euro     Shift+4 becomes " + [char]0x20AC + $a1)
         Write-Host ("  2  dollar   Shift+4 becomes `$ " + $a2)
         Write-Host "  3  doctor"
@@ -348,17 +540,15 @@ function Show-Menu {
         Write-Host "  5  country / regional format profile"
         Write-Host "  6  restore previous regional settings"
         Write-Host ""
-        $choice = Read-Host "  "
+        $choice = Read-Host '  choice [7]'
         switch -Regex ($choice.Trim()) {
             "^(1|e|euro)$" {
-                Set-Mode "euro"
-                Invoke-Apply
-                $last = "applied euro"
+                try { Set-KeyboardMode 'euro'; $last = 'applied euro keyboard mode' }
+                catch { $last = 'keyboard mode failed: ' + $_.Exception.Message }
             }
             "^(2|d|dollar)$" {
-                Set-Mode "dollar"
-                Invoke-Apply
-                $last = "applied dollar"
+                try { Set-KeyboardMode 'dollar'; $last = 'applied dollar keyboard mode' }
+                catch { $last = 'keyboard mode failed: ' + $_.Exception.Message }
             }
             "^3$" {
                 Clear-Host
@@ -368,19 +558,20 @@ function Show-Menu {
             "^(4|q|quit|x|exit)$" {
                 return
             }
-            "^5$" {
-                if (Select-RegionProfile) { $last = "regional profile applied" } else { $last = "profile was not applied" }
+            '^(5|7)?$' {
+                if (Select-RegionProfile) { $last = 'European setup applied' } else { $last = 'setup was not applied' }
             }
             "^6$" {
                 try { Restore-RegionProfile; $last = "previous regional settings restored" }
                 catch { $last = "restore failed: " + $_.Exception.Message }
             }
-            default { $last = "type 1, 2, 3, 4, 5 or 6" }
+            default { $last = 'press Enter for European setup, or type 1-7' }
         }
     }
 }
 
 function Start-HookLoop {
+    Initialize-EzConfig
     $code = @"
 using System;
 using System.Runtime.InteropServices;
@@ -488,43 +679,43 @@ public class EzHook : Form {
     }
 }
 
-$allArgs = @($script:UserArgs.ToArray())
-if ($allArgs -contains "--list-profiles") {
-    Show-RegionProfiles
-    exit 0
-}
-if ($allArgs.Count -gt 0 -and $allArgs[0] -eq "--profile") {
-    if ($allArgs.Count -lt 2) { Write-Host "usage: eurozone.ps1 --profile PROFILE_ID"; exit 2 }
-    try { Set-RegionProfile $allArgs[1]; exit 0 }
-    catch { Write-Host ("profile failed: " + $_.Exception.Message); exit 1 }
-}
-if ($allArgs -contains "--restore-profile") {
-    try { Restore-RegionProfile; exit 0 }
-    catch { Write-Host ("restore failed: " + $_.Exception.Message); exit 1 }
-}
-if ($allArgs -contains "--hook") {
-    Start-HookLoop
-    exit 0
-}
-
-if ($allArgs -contains "--startup") {
-    if ((Get-Mode) -eq "euro") { Start-EzHook }
-    else { Stop-EzHook }
-    exit 0
+function Show-EzHelp {
+    Write-Host "eurozone $Version - per-user European regional setup"
+    Write-Host '  --setup [ID]       apply complete setup (default IE-EN)'
+    Write-Host '  --preview [ID]     read-only samples and scope (default IE-EN)'
+    Write-Host '  --profile ID       same complete setup, explicit country/profile'
+    Write-Host '  --list-profiles    list country/profile IDs and locale codes'
+    Write-Host '  --restore-profile restore the original regional registry and home country'
+    Write-Host '  --help             show this help without writes'
+    Write-Host '  euro | dollar      explicit Shift+4 keyboard mode and startup installation'
+    Write-Host '  no command         menu (Enter: European setup; preview then confirmation)'
+    Write-Host '  --config-dir PATH / --install-dir PATH: optional per-user storage paths'
+    Write-Host '  Setup: EUR symbol/two decimals, local numbers/dates, HH:mm/HH:mm:ss,'
+    Write-Host '  metric, Monday/ISO first week, Gregorian, A4 and home country.'
+    Write-Host '  No display language, input layout, time zone, admin or system-wide changes.'
+    Write-Host '  Celsius is per-app on Windows. Apps/printers can override regional defaults.'
+    Write-Host '  Setup does not install startup or change the keyboard hook.'
 }
 
-[void](Install-EzStartup)
-
-if ($allArgs.Count -eq 0) {
-    Show-Menu
+try {
+    switch ($cmd) {
+        { $_ -in @('--help', '-h') } { Show-EzHelp }
+        '--list-profiles' { Show-RegionProfiles }
+        { $_ -in @('--profile', '--setup', '--preview') } {
+            $identifier = if ($allArgs.Count -eq 2) { $allArgs[1] } else { 'IE-EN' }
+            if ($cmd -eq '--preview') { Show-RegionPreview $identifier }
+            else { Set-RegionProfile $identifier }
+        }
+        '--restore-profile' { Restore-RegionProfile }
+        '--hook' { Start-HookLoop }
+        '--startup' {
+            if ((Get-Mode) -eq 'euro') { Start-EzHook } else { Stop-EzHook }
+        }
+        { $_ -in @('1', 'euro', 'eur') } { Set-KeyboardMode 'euro' }
+        { $_ -in @('2', 'dollar', 'usd') } { Set-KeyboardMode 'dollar' }
+        '3' { Write-Banner; Show-Doctor }
+        { $_ -in @('4', 'quit') } { }
+        '' { Show-Menu }
+    }
     exit 0
-}
-
-$cmd = $allArgs[0].ToLowerInvariant()
-switch ($cmd) {
-    { $_ -in @("1", "euro", "eur") } { Set-Mode "euro"; Invoke-Apply }
-    { $_ -in @("2", "dollar", "usd") } { Set-Mode "dollar"; Invoke-Apply }
-    "3" { Write-Banner; Show-Doctor }
-    { $_ -in @("4", "quit") } { exit 0 }
-    default { Show-Menu }
-}
+} catch { Write-Host ('eurozone failed: ' + $_.Exception.Message); exit 1 }
