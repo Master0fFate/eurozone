@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# eurozone — Shift+4 currency toggle (EUR / USD)
-# Default: numbered menu that stays open. Pick 1 or 2 and it applies.
+# eurozone — European regional setup and optional Shift+4 currency toggle.
+# Bash 3.2 compatible. Regional setup never installs keyboard startup.
 
 set -u
 IFS=$'\n\t'
 
-VERSION="2.0.0"
+VERSION="3.0.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROFILE_CATALOG="$SCRIPT_DIR/eurozone-profiles.tsv"
 
@@ -13,10 +13,12 @@ PROFILE_CATALOG="$SCRIPT_DIR/eurozone-profiles.tsv"
 # installed the login item. Pin the config directory in the startup command.
 CONFIG_DIR_OVERRIDE=""
 if [ "${1:-}" = "--config-dir" ]; then
-  if [ "$#" -ge 3 ]; then
-    CONFIG_DIR_OVERRIDE="$2"
-    shift 2
+  if [ "$#" -lt 3 ] || [ -z "${2:-}" ] || [[ "${2:-}" = --* ]]; then
+    printf '%s\n' 'usage: eurozone --config-dir DIR COMMAND' >&2
+    exit 2
   fi
+  CONFIG_DIR_OVERRIDE="$2"
+  shift 2
 fi
 
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -27,7 +29,7 @@ CACHE_DIR="$XDG_CACHE_HOME/eurozone"
 MODE_FILE="$CONF_DIR/mode"
 PROFILE_ACTIVE_FILE="$CONF_DIR/profile.active"
 PROFILE_BACKUP_DIR="$CONF_DIR/profile-backup"
-PROFILE_ENV_FILE="$HOME/.config/environment.d/90-eurozone-profile.conf"
+PROFILE_ENV_FILE="$XDG_CONFIG_HOME/environment.d/90-eurozone-profile.conf"
 KEY_FILE="$CONF_DIR/keycode"
 PREV_FILE="$CACHE_DIR/prev.xmodmap"
 INSTALL_DIR="$XDG_DATA_HOME/eurozone"
@@ -35,8 +37,6 @@ INSTALLED_SCRIPT="$INSTALL_DIR/eurozone"
 AUTOSTART_FILE="$XDG_CONFIG_HOME/autostart/eurozone.desktop"
 MAC_LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.eurozone.startup.plist"
 KARABINER_RULES_DIR="$HOME/.config/karabiner/assets/complex_modifications"
-
-mkdir -p "$CONF_DIR" "$CACHE_DIR"
 
 EZ_BLUE="" EZ_DIM="" EZ_BOLD="" EZ_RED="" EZ_RST=""
 
@@ -106,10 +106,12 @@ plist_escape() {
 }
 
 install_linux_startup() {
-  mkdir -p "$INSTALL_DIR" "$(dirname "$AUTOSTART_FILE")"
-  cp "$(script_path)" "$INSTALLED_SCRIPT"
-  cp "$PROFILE_CATALOG" "$INSTALL_DIR/eurozone-profiles.tsv"
-  chmod 700 "$INSTALLED_SCRIPT"
+  mkdir -p "$INSTALL_DIR" "$(dirname "$AUTOSTART_FILE")" || return 1
+  if [ "$(script_path)" != "$INSTALLED_SCRIPT" ]; then cp "$(script_path)" "$INSTALLED_SCRIPT" || return 1; fi
+  if [ "$PROFILE_CATALOG" != "$INSTALL_DIR/eurozone-profiles.tsv" ]; then
+    cp "$PROFILE_CATALOG" "$INSTALL_DIR/eurozone-profiles.tsv" || return 1
+  fi
+  chmod 700 "$INSTALLED_SCRIPT" || return 1
   local script_arg config_arg
   script_arg="$(desktop_escape "$INSTALLED_SCRIPT")"
   config_arg="$(desktop_escape "$CONF_DIR")"
@@ -125,10 +127,12 @@ EOF
 }
 
 install_macos_startup() {
-  mkdir -p "$INSTALL_DIR" "$(dirname "$MAC_LAUNCH_AGENT")"
-  cp "$(script_path)" "$INSTALLED_SCRIPT"
-  cp "$PROFILE_CATALOG" "$INSTALL_DIR/eurozone-profiles.tsv"
-  chmod 700 "$INSTALLED_SCRIPT"
+  mkdir -p "$INSTALL_DIR" "$(dirname "$MAC_LAUNCH_AGENT")" || return 1
+  if [ "$(script_path)" != "$INSTALLED_SCRIPT" ]; then cp "$(script_path)" "$INSTALLED_SCRIPT" || return 1; fi
+  if [ "$PROFILE_CATALOG" != "$INSTALL_DIR/eurozone-profiles.tsv" ]; then
+    cp "$PROFILE_CATALOG" "$INSTALL_DIR/eurozone-profiles.tsv" || return 1
+  fi
+  chmod 700 "$INSTALLED_SCRIPT" || return 1
   local script_arg config_arg
   script_arg="$(plist_escape "$INSTALLED_SCRIPT")"
   config_arg="$(plist_escape "$CONF_DIR")"
@@ -176,6 +180,7 @@ read_mode() {
 
 write_mode() {
   local temporary
+  mkdir -p "$CONF_DIR" "$CACHE_DIR" || return 1
   temporary="$(mktemp "$CONF_DIR/.mode.XXXXXX")" || {
     err "could not create temporary mode file in $CONF_DIR"
     return 1
@@ -195,7 +200,8 @@ write_mode() {
 profile_row() {
   local query="$1"
   [ -f "$PROFILE_CATALOG" ] || return 1
-  awk -F'|' -v q="$query" 'NR > 1 && (tolower($1) == tolower(q) || tolower($3) == tolower(q)) { print; exit }' "$PROFILE_CATALOG"
+  [ -n "$query" ] || return 1
+  awk -F'|' -v q="$query" 'NR > 1 && (tolower($1) == tolower(q) || tolower($3) == tolower(q)) { print; found=1; exit } END { if (!found) exit 1 }' "$PROFILE_CATALOG"
 }
 
 list_region_profiles() {
@@ -203,167 +209,473 @@ list_region_profiles() {
   awk -F'|' 'NR > 1 { printf "  %-6s %-24s %s\n", $1, $2, $3 }' "$PROFILE_CATALOG"
 }
 
-save_region_backup() {
-  mkdir -p "$PROFILE_BACKUP_DIR"
-  [ -f "$PROFILE_BACKUP_DIR/ready" ] && return 0
-  case "$(os_family)" in
-    macos)
-      if defaults read -g AppleLocale > "$PROFILE_BACKUP_DIR/apple-locale" 2>/dev/null; then
-        printf 'present\n' > "$PROFILE_BACKUP_DIR/apple-locale-status"
-      else
-        printf 'missing\n' > "$PROFILE_BACKUP_DIR/apple-locale-status"
-      fi
-      ;;
-    linux)
-      if command -v gsettings >/dev/null 2>&1 && gsettings list-schemas 2>/dev/null | grep -qx 'org.gnome.system.locale' &&
-          gsettings get org.gnome.system.locale region > "$PROFILE_BACKUP_DIR/gnome-region" 2>/dev/null; then
-        printf 'present\n' > "$PROFILE_BACKUP_DIR/gnome-region-status"
-      else
-        printf 'unavailable\n' > "$PROFILE_BACKUP_DIR/gnome-region-status"
-      fi
-      if [ -f "$PROFILE_ENV_FILE" ]; then
-        cp -p "$PROFILE_ENV_FILE" "$PROFILE_BACKUP_DIR/environment.d"
-        printf 'present\n' > "$PROFILE_BACKUP_DIR/environment-status"
-      else
-        printf 'missing\n' > "$PROFILE_BACKUP_DIR/environment-status"
-      fi
-      ;;
-    *) err "regional profiles are not available for this operating system"; return 1 ;;
-  esac
-  : > "$PROFILE_BACKUP_DIR/ready"
+# Only these global keys are changed. Do not back up/restore an entire domain:
+# doing so would clobber unrelated preferences changed since setup.
+MAC_REGION_KEYS=(AppleLocale AppleMetricUnits AppleMeasurementUnits AppleTemperatureUnit
+  AppleICUForce24HourTime AppleICUForce12HourTime AppleFirstWeekday AppleMinDaysInFirstWeek)
+PROFILE_ID="" PROFILE_NAME="" PROFILE_CULTURE="" POSIX_LOCALE=""
+GNOME_REGION=0 GNOME_CLOCK=0 SYSTEMD_ENV=0
+LOCALE_CATEGORIES=(LC_NUMERIC LC_MONETARY LC_TIME LC_MEASUREMENT LC_PAPER)
+
+load_profile() {
+  local row
+  row="$(profile_row "$1")" || { err "unknown profile '$1'; use --list-profiles"; return 1; }
+  IFS='|' read -r PROFILE_ID PROFILE_NAME PROFILE_CULTURE <<EOF
+$row
+EOF
+  POSIX_LOCALE="${PROFILE_CULTURE//-/_}.UTF-8"
 }
 
-linux_region_backend_available() {
-  if command -v gsettings >/dev/null 2>&1 && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] &&
-      gsettings list-schemas 2>/dev/null | grep -qx 'org.gnome.system.locale' &&
-      gsettings get org.gnome.system.locale region >/dev/null 2>&1; then
-    return 0
-  fi
+gsettings_writable() {
+  command -v gsettings >/dev/null 2>&1 && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] &&
+    gsettings list-schemas 2>/dev/null | grep -qx "$1" || return 1
+  gsettings list-keys "$1" 2>/dev/null | grep -qx "$2" || return 1
+  [ "$(gsettings writable "$1" "$2" 2>/dev/null)" = true ] || return 1
+  gsettings get "$1" "$2" >/dev/null 2>&1
+}
+
+linux_region_backends() {
+  GNOME_REGION=0 GNOME_CLOCK=0 SYSTEMD_ENV=0
+  if gsettings_writable org.gnome.system.locale region; then GNOME_REGION=1; fi
+  if gsettings_writable org.gnome.desktop.interface clock-format; then GNOME_CLOCK=1; fi
   if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
-    return 0
+    SYSTEMD_ENV=1
   fi
-  return 1
 }
 
 linux_locale_available() {
-  local wanted
-  wanted="$(printf '%s' "$1" | tr '[:upper:]_' '[:lower:]-' | sed 's/\.utf-8$//')"
+  local installed
   command -v locale >/dev/null 2>&1 || return 1
-  LC_ALL=C locale -a 2>/dev/null | awk -v want="$wanted" '
-    { value=tolower($0); sub(/\.(utf-?8|utf8)$/, "", value); gsub(/_/, "-", value); if (value == want) found=1 }
+  installed="$(LC_ALL=C locale -a 2>/dev/null)" || return 1
+  printf '%s\n' "$installed" | awk -v want="$1" '
+    BEGIN { want=tolower(want); gsub(/utf-8/, "utf8", want) }
+    { value=tolower($0); gsub(/utf-8/, "utf8", value); if (value == want) found=1 }
     END { exit !found }
   '
 }
 
-apply_linux_region_profile() {
-  local culture="$1" posix_locale gnome_applied=0 env_applied=0 temporary
-  posix_locale="$(printf '%s' "$culture" | tr '-' '_').UTF-8"
-  if command -v gsettings >/dev/null 2>&1 && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] &&
-      gsettings list-schemas 2>/dev/null | grep -qx 'org.gnome.system.locale'; then
-    if gsettings set org.gnome.system.locale region "'$posix_locale'" >/dev/null 2>&1; then
-      gnome_applied=1
-    fi
-  fi
-  if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
-    if linux_locale_available "$posix_locale"; then
-      mkdir -p "$(dirname "$PROFILE_ENV_FILE")"
-      temporary="$PROFILE_ENV_FILE.tmp.$$"
-      cat > "$temporary" <<EOF
-LC_NUMERIC=$posix_locale
-LC_MONETARY=$posix_locale
-LC_TIME=$posix_locale
-LC_MEASUREMENT=$posix_locale
-LC_PAPER=$posix_locale
-EOF
-      if ! mv -f "$temporary" "$PROFILE_ENV_FILE"; then
-        rm -f "$temporary"
-        err "could not save the user locale environment file"
-        return 1
+linux_locale_value() {
+  # LC_ALL in the caller must not mask the candidate locale during inspection.
+  LC_ALL="$POSIX_LOCALE" locale "$1" 2>/dev/null
+}
+
+region_preflight() {
+  local category currency
+  case "$(os_family)" in
+    macos)
+      command -v defaults >/dev/null 2>&1 && command -v plutil >/dev/null 2>&1 || {
+        err "macOS setup needs the built-in defaults and plutil tools"; return 1;
+      }
+      ;;
+    linux)
+      linux_locale_available "$POSIX_LOCALE" || {
+        err "locale $POSIX_LOCALE is not installed; generate/install it before setup (including GNOME)"; return 1;
+      }
+      linux_region_backends
+      [ "$GNOME_REGION" -eq 1 ] || [ "$SYSTEMD_ENV" -eq 1 ] || {
+        err "need a writable GNOME region with a session bus or a systemd user session"; return 1;
+      }
+      currency="$(linux_locale_value int_curr_symbol)" || return 1
+      currency="$(printf '%s' "$currency" | tr -d '[:space:]\"')"
+      [ "$currency" = EUR ] || {
+        err "$POSIX_LOCALE supplies currency '$currency', not EUR; update locale data or choose an installed EUR profile"; return 1;
+      }
+      LOCALE_CATEGORIES=(LC_NUMERIC LC_MONETARY LC_TIME LC_MEASUREMENT LC_PAPER)
+      for category in "${LOCALE_CATEGORIES[@]}"; do
+        linux_locale_value "$category" >/dev/null || {
+          err "locale category $category is not supported; no settings changed"; return 1;
+        }
+      done
+      for category in LC_ADDRESS LC_NAME LC_TELEPHONE LC_COLLATE; do
+        if linux_locale_value "$category" >/dev/null; then LOCALE_CATEGORIES+=("$category"); fi
+      done
+      ;;
+    windows) err "use eurozone.ps1 --setup $PROFILE_ID on Windows"; return 1 ;;
+    *) err "regional setup is not available for this operating system"; return 1 ;;
+  esac
+}
+
+preview_region_profile() {
+  load_profile "$1" || return 1
+  printf '\n  European setup: %s — %s (%s)\n' "$PROFILE_ID" "$PROFILE_NAME" "$PROFILE_CULTURE"
+  printf '  Keep country-specific date, number and currency formatting; target EUR.\n'
+  printf '  Targets: metric, Celsius, A4, 24-hour time, Monday and ISO-style weeks.\n'
+  printf '  Preserve display language, keyboard layout, time zone and keyboard startup.\n'
+  case "$(os_family)" in
+    macos)
+      printf '  macOS global preferences (typed):\n'
+      printf '    AppleLocale = %s@currency=EUR (string; ICU-aware apps)\n' "${PROFILE_CULTURE//-/_}"
+      printf '    AppleMetricUnits = true (boolean); AppleMeasurementUnits = Centimeters (string)\n'
+      printf '    AppleTemperatureUnit = Celsius (string)\n'
+      printf '    AppleICUForce24HourTime = true; AppleICUForce12HourTime = false (booleans)\n'
+      printf '    AppleFirstWeekday.gregorian = 2; AppleMinDaysInFirstWeek.gregorian = 4 (integers)\n'
+      printf '  Monday + four-day first week are ISO week rules, not a forced date format.\n'
+      printf '  A4 follows the country/printer default; no undocumented print preference is written.\n'
+      printf '  Apps may ignore global/ICU currency overrides or keep their own units/calendar.\n'
+      ;;
+    linux)
+      linux_region_backends
+      printf '  environment.d: %s\n' "$PROFILE_ENV_FILE"
+      printf '    LC_NUMERIC, LC_MONETARY, LC_TIME, LC_MEASUREMENT, LC_PAPER = %s\n' "$POSIX_LOCALE"
+      printf '    Also LC_ADDRESS, LC_NAME, LC_TELEPHONE, LC_COLLATE when libc supports them.\n'
+      printf '    LANG and LC_MESSAGES are not set or changed.\n'
+      if linux_locale_available "$POSIX_LOCALE"; then
+        printf '  Locale installed. Currency from locale: %s\n' "$(linux_locale_value int_curr_symbol || printf unknown)"
+        printf '  Locale time format: %s; first_weekday: %s; week: %s\n' \
+          "$(linux_locale_value t_fmt || printf unknown)" \
+          "$(linux_locale_value first_weekday || printf unknown)" "$(linux_locale_value week || printf unknown)"
+      else
+        printf '  BLOCKED: locale %s must be installed before any settings can be written.\n' "$POSIX_LOCALE"
       fi
-      env_applied=1
-    elif [ "$gnome_applied" -eq 0 ]; then
-      err "locale $posix_locale is not installed; install it before applying this profile"
-      return 1
-    fi
+      if [ "$GNOME_REGION" -eq 1 ]; then
+        printf '  GNOME persistent region = %s\n' "$POSIX_LOCALE"
+      else
+        printf '  GNOME region unavailable/read-only: not changed.\n'
+      fi
+      if [ "$GNOME_CLOCK" -eq 1 ]; then
+        printf '  GNOME clock-format = 24h (writable key).\n'
+      else
+        printf '  GNOME clock-format unavailable/read-only: not changed.\n'
+      fi
+      if [ "$SYSTEMD_ENV" -eq 0 ]; then
+        printf '  No systemd user environment backend detected; environment.d consumption depends on the login session.\n'
+      fi
+      printf '  Celsius has no standard LC category. Units, paper, weekday and week rules depend on locale/app data.\n'
+      printf '  LC_TIME retains country formats; it does not universally force 24h, Monday or ISO week numbers.\n'
+      printf '  environment.d alone does not configure GNOME settings or every shell/session.\n'
+      printf '  Non-EUR locale data blocks setup; no unrelated country is substituted for monetary formats.\n'
+      if [ -n "${LC_ALL:-}" ]; then
+        printf '  WARNING: LC_ALL=%s overrides LC_*; remove that override yourself to use these settings.\n' "$LC_ALL"
+      fi
+      if [ -f "$PROFILE_ENV_FILE" ] && grep -q '^[[:space:]]*LC_ALL[[:space:]]*=' "$PROFILE_ENV_FILE"; then
+        printf '  WARNING: existing environment.d LC_ALL assignment is preserved and can override these categories.\n'
+      fi
+      printf '  Existing LC_ALL in shell/session configuration can also override these categories.\n'
+      ;;
+    *) printf '  This operating system has no Bash regional backend.\n' ;;
+  esac
+  printf '  Applications may need restarting or a new login. Preview has made no changes.\n\n'
+}
+
+# Stage every byte before publishing ready. Snapshots retain full macOS key
+# values/types (including dictionary siblings), file presence and active metadata.
+save_region_snapshot() {
+  local dest="$1" key xml
+  [ -d "$dest" ] || return 1
+  printf '3\n' > "$dest/version" || return 1
+  os_family > "$dest/os" || return 1
+  case "$(os_family)" in
+    macos)
+      defaults export -g "$dest/global.plist" >/dev/null 2>&1 || return 1
+      plutil -lint "$dest/global.plist" >/dev/null 2>&1 || return 1
+      for key in "${MAC_REGION_KEYS[@]}"; do
+        if xml="$(plutil -extract "$key" xml1 -o - "$dest/global.plist" 2>/dev/null)"; then
+          printf '%s\n' "$xml" > "$dest/$key.plist" || return 1
+          defaults read-type -g "$key" > "$dest/$key.type" 2>/dev/null || return 1
+          defaults read -g "$key" > "$dest/$key.value" 2>/dev/null || return 1
+          printf 'present\n' > "$dest/$key.status" || return 1
+        else
+          # read-type succeeding here means extraction failed, not absence.
+          if defaults read-type -g "$key" >/dev/null 2>&1; then return 1; fi
+          printf 'missing\n' > "$dest/$key.status" || return 1
+        fi
+      done
+      ;;
+    linux)
+      printf '%s\n' "$PROFILE_ENV_FILE" > "$dest/environment-path" || return 1
+      if [ -e "$PROFILE_ENV_FILE" ] || [ -L "$PROFILE_ENV_FILE" ]; then
+        [ -f "$PROFILE_ENV_FILE" ] && [ ! -L "$PROFILE_ENV_FILE" ] || {
+          err "refusing non-regular/symlink locale file: $PROFILE_ENV_FILE"; return 1;
+        }
+        cp -p "$PROFILE_ENV_FILE" "$dest/environment.d" || return 1
+        printf 'present\n' > "$dest/environment-status" || return 1
+      else
+        printf 'missing\n' > "$dest/environment-status" || return 1
+      fi
+      printf '%s\n' "$GNOME_REGION" > "$dest/gnome-region-status" || return 1
+      printf '%s\n' "$GNOME_CLOCK" > "$dest/gnome-clock-status" || return 1
+      if [ "$GNOME_REGION" -eq 1 ]; then
+        gsettings get org.gnome.system.locale region > "$dest/gnome-region" || return 1
+      fi
+      if [ "$GNOME_CLOCK" -eq 1 ]; then
+        gsettings get org.gnome.desktop.interface clock-format > "$dest/gnome-clock" || return 1
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+  if [ -f "$PROFILE_ACTIVE_FILE" ]; then
+    cp -p "$PROFILE_ACTIVE_FILE" "$dest/active" || return 1
+    printf 'present\n' > "$dest/active-status" || return 1
+  else
+    printf 'missing\n' > "$dest/active-status" || return 1
   fi
-  if [ "$gnome_applied" -eq 0 ] && [ "$env_applied" -eq 0 ]; then
-    err "Linux regional profiles need GNOME GSettings with a session bus or a systemd user session"
+  : > "$dest/ready"
+}
+
+restore_saved_file() {
+  local status="$1" source="$2" target="$3" temporary
+  case "$status" in
+    present)
+      mkdir -p "$(dirname "$target")" || return 1
+      temporary="$(mktemp "$target.restore.XXXXXX")" || return 1
+      if ! cp -p "$source" "$temporary" || ! mv -f "$temporary" "$target"; then
+        rm -f "$temporary"; return 1
+      fi
+      ;;
+    missing) rm -f "$target" || return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+restore_region_snapshot() {
+  local source="$1" key status value failed=0 target verification
+  [ -f "$source/ready" ] && [ "$(cat "$source/version" 2>/dev/null)" = 3 ] &&
+    [ "$(cat "$source/os" 2>/dev/null)" = "$(os_family)" ] || {
+      err "backup is incomplete, incompatible or belongs to another OS; retained at $source"; return 1;
+    }
+  case "$(os_family)" in
+    macos)
+      for key in "${MAC_REGION_KEYS[@]}"; do
+        status="$(cat "$source/$key.status" 2>/dev/null)" || { failed=1; continue; }
+        case "$status" in
+          present)
+            value="$(cat "$source/$key.plist")" || { failed=1; continue; }
+            if ! defaults write -g "$key" "$value"; then failed=1; continue; fi
+            # Verify type AND complete value, not just defaults' exit status.
+            [ "$(defaults read-type -g "$key" 2>/dev/null)" = "$(cat "$source/$key.type")" ] &&
+              [ "$(defaults read -g "$key" 2>/dev/null)" = "$(cat "$source/$key.value")" ] || failed=1
+            ;;
+          missing)
+            if defaults read-type -g "$key" >/dev/null 2>&1; then
+              defaults delete -g "$key" >/dev/null 2>&1 || failed=1
+            fi
+            if defaults read-type -g "$key" >/dev/null 2>&1; then failed=1; fi
+            ;;
+          *) failed=1 ;;
+        esac
+      done
+      # A failed read is not proof of absence if the preferences service failed.
+      verification="$(mktemp "$CONF_DIR/.restore-check.XXXXXX")" || return 1
+      if defaults export -g "$verification" >/dev/null 2>&1 && plutil -lint "$verification" >/dev/null 2>&1; then
+        for key in "${MAC_REGION_KEYS[@]}"; do
+          if [ "$(cat "$source/$key.status" 2>/dev/null)" = missing ] &&
+              plutil -extract "$key" xml1 -o - "$verification" >/dev/null 2>&1; then
+            failed=1
+          fi
+        done
+      else
+        failed=1
+      fi
+      rm -f "$verification"
+      ;;
+    linux)
+      status="$(cat "$source/gnome-region-status" 2>/dev/null)"
+      case "$status" in
+        1)
+          value="$(cat "$source/gnome-region")" &&
+            gsettings set org.gnome.system.locale region "$value" &&
+            [ "$(gsettings get org.gnome.system.locale region)" = "$value" ] || failed=1 ;;
+        0) ;;
+        *) failed=1 ;;
+      esac
+      status="$(cat "$source/gnome-clock-status" 2>/dev/null)"
+      case "$status" in
+        1)
+          value="$(cat "$source/gnome-clock")" &&
+            gsettings set org.gnome.desktop.interface clock-format "$value" &&
+            [ "$(gsettings get org.gnome.desktop.interface clock-format)" = "$value" ] || failed=1 ;;
+        0) ;;
+        *) failed=1 ;;
+      esac
+      target="$(cat "$source/environment-path")" || return 1
+      [ -n "$target" ] || return 1
+      restore_saved_file "$(cat "$source/environment-status" 2>/dev/null)" "$source/environment.d" "$target" || failed=1
+      ;;
+  esac
+  if [ "$failed" -ne 0 ]; then
+    err "regional restore was incomplete; backup retained at $source"
     return 1
+  fi
+  restore_saved_file "$(cat "$source/active-status" 2>/dev/null)" "$source/active" "$PROFILE_ACTIVE_FILE"
+}
+
+mac_write_week_rule() {
+  local key="$1" day="$2" temporary value failed=0
+  temporary="$(mktemp -d "$CONF_DIR/.week-rule.XXXXXX")" || return 1
+  if ! defaults export -g "$temporary/global.plist" >/dev/null 2>&1; then
+    rm -rf "$temporary"; return 1
+  fi
+  if ! plutil -extract "$key" xml1 -o "$temporary/value.plist" "$temporary/global.plist" 2>/dev/null; then
+    if defaults read-type -g "$key" >/dev/null 2>&1; then
+      rm -rf "$temporary"; return 1
+    fi
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+      '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+      '<plist version="1.0"><dict/></plist>' > "$temporary/value.plist" || failed=1
+  fi
+  if [ "$failed" -eq 0 ]; then
+    # Preserve any non-Gregorian calendar entries and use an actual integer.
+    plutil -replace gregorian -integer "$day" "$temporary/value.plist" 2>/dev/null ||
+      plutil -insert gregorian -integer "$day" "$temporary/value.plist" || failed=1
+  fi
+  if [ "$failed" -eq 0 ]; then
+    value="$(cat "$temporary/value.plist")" && defaults write -g "$key" "$value" || failed=1
+  fi
+  rm -rf "$temporary"
+  [ "$failed" -eq 0 ]
+}
+
+mac_verify_applied() {
+  local temporary failed=0
+  temporary="$(mktemp "$CONF_DIR/.region-check.XXXXXX")" || return 1
+  if ! defaults export -g "$temporary" >/dev/null 2>&1; then rm -f "$temporary"; return 1; fi
+  mac_value_is "$temporary" AppleLocale "<string>${PROFILE_CULTURE//-/_}@currency=EUR</string>" &&
+    mac_value_is "$temporary" AppleMetricUnits '<true/>' &&
+    mac_value_is "$temporary" AppleMeasurementUnits '<string>Centimeters</string>' &&
+    mac_value_is "$temporary" AppleTemperatureUnit '<string>Celsius</string>' &&
+    mac_value_is "$temporary" AppleICUForce24HourTime '<true/>' &&
+    mac_value_is "$temporary" AppleICUForce12HourTime '<false/>' &&
+    mac_value_is "$temporary" AppleFirstWeekday.gregorian '<integer>2</integer>' &&
+    mac_value_is "$temporary" AppleMinDaysInFirstWeek.gregorian '<integer>4</integer>' || failed=1
+  rm -f "$temporary"
+  [ "$failed" -eq 0 ]
+}
+
+mac_value_is() {
+  plutil -extract "$2" xml1 -o - "$1" 2>/dev/null | grep -Fq "$3"
+}
+
+apply_macos_region_profile() {
+  defaults write -g AppleLocale -string "${PROFILE_CULTURE//-/_}@currency=EUR" &&
+    defaults write -g AppleMetricUnits -bool true &&
+    defaults write -g AppleMeasurementUnits -string Centimeters &&
+    defaults write -g AppleTemperatureUnit -string Celsius &&
+    defaults write -g AppleICUForce24HourTime -bool true &&
+    defaults write -g AppleICUForce12HourTime -bool false &&
+    mac_write_week_rule AppleFirstWeekday 2 &&
+    mac_write_week_rule AppleMinDaysInFirstWeek 4 &&
+    mac_verify_applied
+}
+
+apply_linux_region_profile() {
+  local temporary category
+  mkdir -p "$(dirname "$PROFILE_ENV_FILE")" || return 1
+  temporary="$(mktemp "$PROFILE_ENV_FILE.tmp.XXXXXX")" || return 1
+  if ! (
+    # Keep unrelated assignments, especially an existing LANG/LC_MESSAGES.
+    if [ -f "$PROFILE_ENV_FILE" ]; then
+      awk -v categories="${LOCALE_CATEGORIES[*]}" '
+        BEGIN { count=split(categories, keys, "\n"); for (i=1; i<=count; i++) remove[keys[i]]=1 }
+        /^# eurozone: regional categories only; preserve LANG and LC_MESSAGES\.$/ { next }
+        { key=$0; sub(/^[ \t]*/, "", key); sub(/[ \t]*=.*/, "", key); if (!(key in remove)) print }
+      ' "$PROFILE_ENV_FILE" || exit 1
+    fi
+    printf '# eurozone: regional categories only; preserve LANG and LC_MESSAGES.\n' || exit 1
+    for category in "${LOCALE_CATEGORIES[@]}"; do
+      printf '%s=%s\n' "$category" "$POSIX_LOCALE" || exit 1
+    done
+  ) > "$temporary" || ! mv -f "$temporary" "$PROFILE_ENV_FILE"; then
+    rm -f "$temporary"; return 1
+  fi
+  if [ "$GNOME_REGION" -eq 1 ]; then
+    gsettings set org.gnome.system.locale region "'$POSIX_LOCALE'" &&
+      [ "$(gsettings get org.gnome.system.locale region)" = "'$POSIX_LOCALE'" ] || return 1
+  fi
+  if [ "$GNOME_CLOCK" -eq 1 ]; then
+    gsettings set org.gnome.desktop.interface clock-format "'24h'" &&
+      [ "$(gsettings get org.gnome.desktop.interface clock-format)" = "'24h'" ] || return 1
   fi
 }
 
 apply_region_profile() {
-  local query="$1" row id name culture apple_locale
-  row="$(profile_row "$query")" || { err "unknown profile '$query'; use --list-profiles"; return 1; }
-  IFS='|' read -r id name culture <<EOF
-$row
-EOF
-  if [ "$(os_family)" = "linux" ] && ! linux_region_backend_available; then
-    err "Linux regional profiles need GNOME GSettings with a session bus or a systemd user session"
+  local transaction temporary failed=0
+  load_profile "$1" && region_preflight || return 1
+  # A switched backend must not acquire new unbacked GNOME keys. Restore first.
+  if [ -e "$PROFILE_BACKUP_DIR" ]; then
+    [ -f "$PROFILE_BACKUP_DIR/ready" ] && [ "$(cat "$PROFILE_BACKUP_DIR/version" 2>/dev/null)" = 3 ] &&
+      [ "$(cat "$PROFILE_BACKUP_DIR/os" 2>/dev/null)" = "$(os_family)" ] || {
+        err "existing backup is incompatible/incomplete; retained without changing settings"; return 1;
+      }
+    if [ "$(os_family)" = linux ]; then
+      if { [ "$GNOME_REGION" -eq 1 ] && [ "$(cat "$PROFILE_BACKUP_DIR/gnome-region-status")" != 1 ]; } ||
+          { [ "$GNOME_CLOCK" -eq 1 ] && [ "$(cat "$PROFILE_BACKUP_DIR/gnome-clock-status")" != 1 ]; } ||
+          [ "$(cat "$PROFILE_BACKUP_DIR/environment-path")" != "$PROFILE_ENV_FILE" ]; then
+        err "regional backend/config location changed; restore the existing backup before setup"; return 1
+      fi
+    fi
+  fi
+  mkdir -p "$CONF_DIR" || return 1
+  transaction="$(mktemp -d "$CONF_DIR/.region-transaction.XXXXXX")" || return 1
+  if ! save_region_snapshot "$transaction"; then
+    rm -rf "$transaction"
+    err "could not save complete regional backup; no settings changed"
     return 1
   fi
-  save_region_backup || return 1
+  if [ ! -e "$PROFILE_BACKUP_DIR" ]; then
+    # Copy the complete staged snapshot, publishing the undo point atomically.
+    temporary="$(mktemp -d "$CONF_DIR/.region-backup.XXXXXX")" || { rm -rf "$transaction"; return 1; }
+    if ! cp -pR "$transaction/." "$temporary/" || ! mv "$temporary" "$PROFILE_BACKUP_DIR"; then
+      rm -rf "$temporary" "$transaction"; err "could not publish regional backup"; return 1
+    fi
+  fi
   case "$(os_family)" in
-    macos)
-      apple_locale="${culture//-/_}"
-      if ! defaults write -g AppleLocale "$apple_locale"; then
-        err "macOS rejected region $apple_locale"
-        return 1
-      fi
-      ;;
-    linux) apply_linux_region_profile "$culture" || return 1 ;;
-    windows) err "use eurozone.ps1 --profile $id on Windows"; return 1 ;;
-    *) err "regional profiles are not available for this operating system"; return 1 ;;
+    macos) apply_macos_region_profile || failed=1 ;;
+    linux) apply_linux_region_profile || failed=1 ;;
   esac
-  printf '%s|%s|%s\n' "$id" "$name" "$culture" > "$PROFILE_ACTIVE_FILE"
-  ok "regional profile applied: $name ($culture); restart apps or sign in again if formats do not update"
-  ok "interface language, keyboard layout and time zone were not changed"
+  if [ "$failed" -eq 0 ]; then
+    temporary="$(mktemp "$CONF_DIR/.profile-active.XXXXXX")" || failed=1
+    if [ "$failed" -eq 0 ]; then
+      if ! printf '%s|%s|%s\n' "$PROFILE_ID" "$PROFILE_NAME" "$PROFILE_CULTURE" > "$temporary" ||
+          ! mv -f "$temporary" "$PROFILE_ACTIVE_FILE"; then
+        rm -f "$temporary"; failed=1
+      fi
+    fi
+  fi
+  if [ "$failed" -ne 0 ]; then
+    err "European setup failed; attempting rollback to the settings before this attempt"
+    if restore_region_snapshot "$transaction"; then
+      rm -rf "$transaction"
+      err "rollback completed; setup was not applied"
+    else
+      err "rollback failed; recovery snapshot kept at $transaction (original backup also retained)"
+    fi
+    return 1
+  fi
+  rm -rf "$transaction"
+  ok "European setup applied: $PROFILE_NAME ($PROFILE_CULTURE); restart apps or sign in again"
+  ok "display language, keyboard layout and time zone were not changed; no keyboard startup installed"
+  if [ "$(os_family)" = linux ]; then
+    ok "locale supplies units/paper/week rules; Celsius, Monday, ISO weeks and 24h are not universal app overrides"
+    if [ -n "${LC_ALL:-}" ]; then err "LC_ALL=$LC_ALL overrides the configured LC_* categories"; fi
+    if grep -q '^[[:space:]]*LC_ALL[[:space:]]*=' "$PROFILE_ENV_FILE"; then
+      err "the preserved environment.d LC_ALL assignment can override the configured LC_* categories"
+    fi
+    if [ "$GNOME_REGION" -eq 0 ]; then ok "environment.d only: GNOME region was not changed"; fi
+    if [ "$GNOME_CLOCK" -eq 0 ]; then ok "GNOME clock was not changed"; fi
+  else
+    ok "A4 follows country/printer defaults; apps may ignore global preferences or the ICU EUR override"
+  fi
 }
 
 restore_region_profile() {
   [ -f "$PROFILE_BACKUP_DIR/ready" ] || { err "no saved regional settings to restore"; return 1; }
-  case "$(os_family)" in
-    macos)
-      if [ "$(cat "$PROFILE_BACKUP_DIR/apple-locale-status")" = "present" ]; then
-        defaults write -g AppleLocale "$(cat "$PROFILE_BACKUP_DIR/apple-locale")" || return 1
-      else
-        defaults delete -g AppleLocale >/dev/null 2>&1 || true
-      fi
-      ;;
-    linux)
-      if [ "$(cat "$PROFILE_BACKUP_DIR/gnome-region-status")" = "present" ]; then
-        gsettings set org.gnome.system.locale region "$(cat "$PROFILE_BACKUP_DIR/gnome-region")" || return 1
-      fi
-      if [ "$(cat "$PROFILE_BACKUP_DIR/environment-status")" = "present" ]; then
-        mkdir -p "$(dirname "$PROFILE_ENV_FILE")"
-        cp -p "$PROFILE_BACKUP_DIR/environment.d" "$PROFILE_ENV_FILE" || return 1
-      else
-        rm -f "$PROFILE_ENV_FILE"
-      fi
-      ;;
-    windows) err "use eurozone.ps1 --restore-profile on Windows"; return 1 ;;
-    *) err "regional profiles are not available for this operating system"; return 1 ;;
-  esac
-  rm -f "$PROFILE_ACTIVE_FILE"
-  rm -rf "$PROFILE_BACKUP_DIR"
-  ok "previous regional settings restored; restart apps or sign in again if formats do not update"
+  restore_region_snapshot "$PROFILE_BACKUP_DIR" || return 1
+  rm -rf "$PROFILE_BACKUP_DIR" || { err "settings restored, but backup cleanup failed"; return 1; }
+  ok "previous regional settings restored; restart apps or sign in again if needed"
 }
 
 select_region_profile() {
-  local choice row id name culture confirm
+  local choice confirm
   printf '\n  Country profile (display language stays separate):\n'
   list_region_profiles || return 1
-  printf '\n  Enter a profile ID or locale code: '
+  printf '\n  Enter a profile ID or locale code [IE-EN]: '
   if ! read -r choice; then return 1; fi
-  row="$(profile_row "$choice")" || { err "unknown profile '$choice'; no settings changed"; return 1; }
-  IFS='|' read -r id name culture <<EOF
-$row
-EOF
-  printf '  Preview: set regional formats to %s (%s). Keep keyboard and time zone.\n' "$name" "$culture"
+  choice="${choice:-IE-EN}"
+  preview_region_profile "$choice" || return 1
   printf '  Apply these settings? [y/N] '
   if ! read -r confirm; then return 1; fi
   case "$(printf '%s' "$confirm" | tr '[:upper:]' '[:lower:]')" in
-    y|yes) apply_region_profile "$id" ;;
+    y|yes) apply_region_profile "$choice" ;;
     *) ok "no regional settings changed"; return 1 ;;
   esac
 }
@@ -449,6 +761,10 @@ apply_linux() {
   local mode="$1" kc shifted
   if ! command -v xmodmap >/dev/null 2>&1; then
     err "xmodmap not found (needed to identify the X11 keycode)"
+    return 1
+  fi
+  if [ "${XDG_SESSION_TYPE:-}" = wayland ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    err "X11 remapping does not cover native Wayland apps; use your compositor's keyboard configuration"
     return 1
   fi
   if [ -z "${DISPLAY:-}" ]; then
@@ -561,7 +877,7 @@ show_doctor() {
       ok "DISPLAY   ${DISPLAY:-none}"
       if command -v xmodmap >/dev/null 2>&1; then
         ok "xmodmap   $(command -v xmodmap)"
-        ok "keycode 4 $(probe_keycode)"
+        if [ -f "$KEY_FILE" ]; then ok "keycode 4 $(cat "$KEY_FILE")"; else ok "keycode 4 not probed"; fi
       else
         ok "xmodmap   missing"
       fi
@@ -613,6 +929,7 @@ show_menu() {
     printf '  4  quit\n'
     printf '  5  country / regional format profile\n'
     printf '  6  restore previous regional settings\n'
+    printf '  7  European setup (recommended; Enter default)\n'
     printf '\n'
     printf '  '
     if ! read -r choice; then
@@ -622,17 +939,17 @@ show_menu() {
     choice="$(printf '%s' "$choice" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
     case "$choice" in
       1|e|euro)
-        if write_mode euro; then
-          if apply_now; then LAST_MSG="applied euro"; else LAST_MSG="saved euro; apply failed"; fi
+        if keyboard_action euro; then
+          LAST_MSG="applied euro"
         else
-          LAST_MSG="could not save euro mode"
+          LAST_MSG="euro keyboard action failed"
         fi
         ;;
       2|d|dollar)
-        if write_mode dollar; then
-          if apply_now; then LAST_MSG="applied dollar"; else LAST_MSG="saved dollar; apply failed"; fi
+        if keyboard_action dollar; then
+          LAST_MSG="applied dollar"
         else
-          LAST_MSG="could not save dollar mode"
+          LAST_MSG="dollar keyboard action failed"
         fi
         ;;
       3)
@@ -643,70 +960,83 @@ show_menu() {
       4|q|quit|x|exit)
         return
         ;;
-      5)
-        if select_region_profile; then LAST_MSG="regional profile saved"; else LAST_MSG="profile was not applied"; fi
+      5|7|"")
+        if select_region_profile; then LAST_MSG="European setup saved"; else LAST_MSG="setup was not applied"; fi
         ;;
       6)
         if restore_region_profile; then LAST_MSG="previous regional settings restored"; else LAST_MSG="restore failed"; fi
         ;;
       *)
-        LAST_MSG="type 1, 2, 3, 4, 5 or 6"
+        LAST_MSG="type 1–7 (Enter for European setup)"
         ;;
     esac
   done
 }
 
-if [ "${1:-}" = "--list-profiles" ]; then
-  list_region_profiles
-  exit $?
-fi
-if [ "${1:-}" = "--profile" ]; then
-  if [ "$#" -lt 2 ]; then err "usage: eurozone --profile PROFILE_ID"; exit 2; fi
-  apply_region_profile "$2"
-  exit $?
-fi
-if [ "${1:-}" = "--restore-profile" ]; then
-  restore_region_profile
-  exit $?
-fi
-if [ "${1:-}" = "--startup" ]; then
+show_help() {
+  printf '%s\n' \
+    "eurozone $VERSION — European regional setup" \
+    'Usage: eurozone [--config-dir DIR] COMMAND' \
+    '  --setup [ID]       Apply comprehensive setup (default IE-EN)' \
+    '  --profile ID       Alias for comprehensive setup; ID required' \
+    '  --preview [ID]     Read-only detailed preview (default IE-EN)' \
+    '  --list-profiles    List country IDs and locale codes' \
+    '  --restore-profile Restore the original regional settings' \
+    '  --help            Read-only help' \
+    '  euro | dollar     Optional Shift+4 remap and keyboard login startup' \
+    '  --startup         Reapply only the saved keyboard mode' \
+    '  No arguments: menu; Enter/7 opens recommended setup and confirmation.' \
+    '  Legacy menu/CLI actions 1–6 remain available; 5 opens country setup.' \
+    'Regional setup preserves display language, keyboard layout and time zone.' \
+    'Linux requires installed EUR locale data and GNOME or a systemd user session.' \
+    'Locale/app limitations are shown by --preview; native Wayland remapping is not supported.'
+}
+
+keyboard_action() {
+  write_mode "$1" || return 1
+  install_startup || { err "could not register keyboard login startup"; return 1; }
   apply_now
-  exit 0
-fi
+}
 
-if ! install_startup; then
-  err "could not register login startup"
-fi
+# Validate the complete command before any directory, preference or startup write.
+command_name="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+case "$command_name" in
+  --profile)
+    [ "$#" -eq 2 ] && [ -n "${2:-}" ] && [[ "$2" != --* ]] || {
+      err "usage: eurozone --profile PROFILE_ID"; exit 2;
+    }
+    load_profile "$2" || exit 2
+    ;;
+  --setup|--preview)
+    [ "$#" -le 2 ] && { [ "$#" -eq 1 ] || { [ -n "${2:-}" ] && [[ "$2" != --* ]]; }; } || {
+      err "usage: eurozone $command_name [PROFILE_ID]"; exit 2;
+    }
+    load_profile "${2:-IE-EN}" || exit 2
+    ;;
+  "")
+    [ "$#" -eq 0 ] || { err "empty command is invalid; use --help"; exit 2; }
+    ;;
+  --help|-h|--version|--list-profiles|--restore-profile|--startup|1|euro|eur|2|dollar|usd|3|4|quit|5|profile|6|restore-profile|7)
+    [ "$#" -eq 1 ] || { err "unexpected arguments; use --help"; exit 2; }
+    ;;
+  *) err "unknown command '$1'; use --help"; exit 2 ;;
+esac
 
-# no args: stay in the menu
-if [ "${1:-}" = "" ]; then
-  show_menu
-  exit 0
-fi
-
-case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
-  1|euro|eur)
-    write_mode euro || exit 1
+case "$command_name" in
+  --help|-h) show_help ;;
+  --version) printf '%s\n' "$VERSION" ;;
+  --list-profiles) list_region_profiles ;;
+  --preview) preview_region_profile "${2:-IE-EN}" ;;
+  --profile|--setup) apply_region_profile "${2:-IE-EN}" ;;
+  --restore-profile|6|restore-profile) restore_region_profile ;;
+  --startup)
+    mkdir -p "$CONF_DIR" "$CACHE_DIR" || exit 1
     apply_now
     ;;
-  2|dollar|usd)
-    write_mode dollar || exit 1
-    apply_now
-    ;;
-  3)
-    banner
-    show_doctor
-    ;;
-  4|quit)
-    exit 0
-    ;;
-  5|profile)
-    select_region_profile
-    ;;
-  6|restore-profile)
-    restore_region_profile
-    ;;
-  *)
-    show_menu
-    ;;
+  "") show_menu ;;
+  1|euro|eur) keyboard_action euro ;;
+  2|dollar|usd) keyboard_action dollar ;;
+  3) banner; show_doctor ;;
+  4|quit) exit 0 ;;
+  5|profile|7) select_region_profile ;;
 esac
