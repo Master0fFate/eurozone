@@ -5,7 +5,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$Version = "3.0.0"
+$Version = "3.0.1"
 
 # Startup may pass the user's paths explicitly so the installed copy uses the
 # same per-user profile and region settings as the menu.
@@ -37,8 +37,9 @@ try {
         { $_ -in @('--setup', '--preview') } {
             if ($allArgs.Count -gt 2) { throw "$cmd accepts at most one profile ID" }
         }
-        { $_ -in @('', '--help', '-h', '--list-profiles', '--restore-profile', '--hook', '--startup',
-                '1', 'euro', 'eur', '2', 'dollar', 'usd', '3', '4', 'quit') } {
+        { $_ -in @('', '--help', '-h', '--version', '--list-profiles', '--restore-profile', '--hook', '--startup',
+                '1', 'euro', 'eur', '2', 'dollar', 'usd', '3', '4', 'quit',
+                '5', 'profile', '6', 'restore-profile', '7') } {
             if ($allArgs.Count -gt 1) { throw "unexpected arguments after $cmd" }
         }
         default { throw "unknown command '$cmd'; use --help" }
@@ -287,12 +288,27 @@ function Import-RegionSnapshot([string]$Path) {
     if ($LASTEXITCODE -ne 0) { throw "could not import regional snapshot: $Path" }
 }
 
+# Direct registry writes and reg.exe imports do not tell running programs.
+# Broadcast the same notice Control Panel sends, so Explorer's clock and open
+# applications reload formats without a sign-out. Failure here is not an error.
+function Send-RegionChangeNotice {
+    try {
+        if (-not ('Eurozone.Native' -as [type])) {
+            Add-Type -Namespace Eurozone -Name Native -MemberDefinition '[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);'
+        }
+        $result = [UIntPtr]::Zero
+        # HWND_BROADCAST, WM_SETTINGCHANGE, "intl", SMTO_ABORTIFHUNG, 1 s per window.
+        [void][Eurozone.Native]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'intl', 2, 1000, [ref]$result)
+    } catch { }
+}
+
 function Undo-RegionFailure([string]$Snapshot, [string]$Failure) {
     try { Import-RegionSnapshot $Snapshot }
     catch {
         throw ("{0}; ROLLBACK FAILED: {1}. Settings may be partial. Recovery snapshot retained at {2}; original backup at {3}" -f
             $Failure, $_.Exception.Message, $Snapshot, $ProfileBackupFile)
     }
+    Send-RegionChangeNotice
     Remove-Item -LiteralPath $Snapshot -Force -ErrorAction SilentlyContinue
     throw "$Failure; previous regional registry recovered. Restart apps/sign out to refresh cached formats."
 }
@@ -337,6 +353,7 @@ function Set-RegionProfile([string]$Identifier) {
         Save-ProfileActive $plan.Profile.id $plan.Culture.Name
     } catch { Undo-RegionFailure $currentSnapshot $_.Exception.Message }
     Remove-Item -LiteralPath $currentSnapshot -Force -ErrorAction SilentlyContinue
+    Send-RegionChangeNotice
     Write-Ok ("European setup applied: {0} ({1})" -f $plan.Profile.name, $plan.Culture.Name)
     Write-Ok 'EUR symbol, two decimals; country date/number formats; 24-hour time; metric; Monday/ISO week; Gregorian; A4; home country'
     Write-Ok 'display language, input layouts, keyboard hook, startup and time zone were not changed'
@@ -367,6 +384,7 @@ function Restore-RegionProfile {
         Undo-RegionFailure $currentSnapshot $failure
     }
     Remove-Item -LiteralPath $currentSnapshot -Force -ErrorAction SilentlyContinue
+    Send-RegionChangeNotice
     Write-Ok 'previous Windows regional registry and home country restored (including removal of added values/keys)'
     Write-Ok 'restart apps or sign out and back in if formats do not update'
 }
@@ -463,7 +481,7 @@ function Start-EzHook {
     $self = $PSCommandPath
     $arg = ('-NoProfile -STA -ExecutionPolicy Bypass -File "{0}" --hook --config-dir "{1}" --install-dir "{2}"' -f `
         $self, $ConfDir, $InstallDir)
-    $p = Start-Process -FilePath "powershell.exe" -PassThru -WindowStyle Hidden -ArgumentList $arg
+    $p = Start-Process -FilePath $WindowsPowerShell -PassThru -WindowStyle Hidden -ArgumentList $arg
     Set-Content -Path $PidFile -Value ([string]$p.Id) -Encoding ASCII
 }
 
@@ -522,7 +540,7 @@ function Show-Menu {
         $profile = if (Test-Path $ProfileActiveFile) { (Get-Content $ProfileActiveFile -TotalCount 1).Trim() } else { "none" }
         Write-Host ("  now  " + $mode + "  Shift+4 -> " + (Get-Symbol $mode) + "   " + $hookTxt)
         Write-Host ("  region " + $culture + "   profile " + $profile)
-        if (-not (Test-EzAdmin)) { Write-Host "  WARNING  not admin  remap will miss elevated windows" }
+        if ($mode -eq 'euro' -and -not (Test-EzAdmin)) { Write-Host "  WARNING  not admin  remap will miss elevated windows" }
         if ($script:StartupError) { Write-Host ("  WARNING  startup registration failed: " + $script:StartupError) }
         if ($last) { Write-Ez ("  " + $last) }
         Write-Host ""
@@ -687,6 +705,7 @@ function Show-EzHelp {
     Write-Host '  --list-profiles    list country/profile IDs and locale codes'
     Write-Host '  --restore-profile restore the original regional registry and home country'
     Write-Host '  --help             show this help without writes'
+    Write-Host '  --version          print the version'
     Write-Host '  euro | dollar      explicit Shift+4 keyboard mode and startup installation'
     Write-Host '  no command         menu (Enter: European setup; preview then confirmation)'
     Write-Host '  --config-dir PATH / --install-dir PATH: optional per-user storage paths'
@@ -700,13 +719,15 @@ function Show-EzHelp {
 try {
     switch ($cmd) {
         { $_ -in @('--help', '-h') } { Show-EzHelp }
+        '--version' { Write-Host $Version }
         '--list-profiles' { Show-RegionProfiles }
         { $_ -in @('--profile', '--setup', '--preview') } {
             $identifier = if ($allArgs.Count -eq 2) { $allArgs[1] } else { 'IE-EN' }
             if ($cmd -eq '--preview') { Show-RegionPreview $identifier }
             else { Set-RegionProfile $identifier }
         }
-        '--restore-profile' { Restore-RegionProfile }
+        { $_ -in @('--restore-profile', '6', 'restore-profile') } { Restore-RegionProfile }
+        { $_ -in @('5', 'profile', '7') } { if (-not (Select-RegionProfile)) { exit 1 } }
         '--hook' { Start-HookLoop }
         '--startup' {
             if ((Get-Mode) -eq 'euro') { Start-EzHook } else { Stop-EzHook }

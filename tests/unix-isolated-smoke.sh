@@ -75,7 +75,7 @@ for command in xmodmap xkbcomp defaults karabiner_cli; do
 done
 chmod +x "$tmp/bin/"*
 
-run() { bash "$repo_root/eurozone" "$@"; }
+run() { "$BASH" "$repo_root/eurozone" "$@"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 reject() {
   if run "$@" > "$tmp/rejected.log" 2>&1; then fail "accepted invalid input: $*"; fi
@@ -106,6 +106,8 @@ if EZ_TEST_OS=Plan9 run --setup DE > "$tmp/unsupported.log" 2>&1; then fail 'uns
 # Installed locales are required even when GNOME is available.
 if EZ_NO_LOCALES=1 run --setup DE > "$tmp/missing.log" 2>&1; then fail 'missing locale accepted'; fi
 [ ! -f "$EZ_TEST_STATE/org.gnome.system.locale.region" ] || fail 'missing locale changed GNOME'
+grep -q 'de_DE.UTF-8 is not installed' "$tmp/missing.log" || fail 'missing locale not explained'
+grep -q 'then run this setup again' "$tmp/missing.log" || fail 'missing locale has no next step'
 [ ! -e "$XDG_CONFIG_HOME/eurozone/profile.active" ] || fail 'missing locale marked active'
 if EZ_TEST_CURRENCY=BGN run --setup DE > "$tmp/currency.log" 2>&1; then fail 'stale non-euro locale accepted'; fi
 [ ! -f "$EZ_TEST_STATE/org.gnome.system.locale.region" ] || fail 'stale currency changed GNOME'

@@ -120,6 +120,8 @@ keyboard hook or a startup item.
 - **Windows:** built-in `RegisterHotKey` / `SendInput` hook. It may miss elevated
   apps. It does not change the keyboard layout. Dollar mode stops the hook and
   restores the layout's own Shift+4 output, which is not `$` on every layout.
+  Do not enable it on layouts that type digits with Shift (for example French
+  AZERTY): it would replace the digit `4`.
 - **Linux/X11:** `xkbcomp`, with an `xmodmap` fallback. Not supported on Wayland.
 - **macOS:** needs Karabiner-Elements and one-time enabling of the
   **eurozone Shift+4** rule. The rule assumes a US input layout; other layouts

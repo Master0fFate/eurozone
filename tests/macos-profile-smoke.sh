@@ -52,9 +52,9 @@ defaults write -g AppleICUTimeFormatStrings -dict 1 'h:mm a'
 defaults write -g AppleICUNumberSymbols -dict 0 '.' 1 ','
 state > "$tmp/before"
 
-bash "$repo_root/eurozone" --preview DE
+"$BASH" "$repo_root/eurozone" --preview DE
 [ ! -e "$XDG_CONFIG_HOME" ]
-bash "$repo_root/eurozone" --setup
+"$BASH" "$repo_root/eurozone" --setup
 actual="$(defaults read -g AppleLocale)"
 [[ "$actual" == en_IE@*calendar=gregorian*currency=EUR* ]]
 [ "$(defaults read -g AppleMetricUnits)" = 1 ]
@@ -72,9 +72,9 @@ done
 [ -f "$XDG_CONFIG_HOME/eurozone/profile.active" ]
 [ ! -e "$HOME/Library/LaunchAgents/com.eurozone.startup.plist" ]
 
-bash "$repo_root/eurozone" --profile FR
+"$BASH" "$repo_root/eurozone" --profile FR
 [[ "$(defaults read -g AppleLocale)" == fr_FR@*currency=EUR* ]]
-bash "$repo_root/eurozone" --restore-profile
+"$BASH" "$repo_root/eurozone" --restore-profile
 state > "$tmp/after"
 cmp "$tmp/before" "$tmp/after"
 [ ! -e "$XDG_CONFIG_HOME/eurozone/profile.active" ]
@@ -85,13 +85,13 @@ mkdir -p "$legacy"
 printf 'present\n' > "$legacy/apple-locale-status"
 printf 'en_US\n' > "$legacy/apple-locale"
 : > "$legacy/ready"
-if bash "$repo_root/eurozone" --setup DE; then echo 'Applied v3 over a v2 backup' >&2; exit 1; fi
-bash "$repo_root/eurozone" --restore-profile
+if "$BASH" "$repo_root/eurozone" --setup DE; then echo 'Applied v3 over a v2 backup' >&2; exit 1; fi
+"$BASH" "$repo_root/eurozone" --restore-profile
 [ "$(defaults read -g AppleLocale)" = en_US ]
 [ ! -e "$legacy" ]
 
 # Stub checks our payload, not a live Karabiner install or non-US input layout.
-bash "$repo_root/eurozone" euro >/dev/null
+"$BASH" "$repo_root/eurozone" euro >/dev/null
 rule="$HOME/.config/karabiner/assets/complex_modifications/eurozone.json"
 launch_agent="$HOME/Library/LaunchAgents/com.eurozone.startup.plist"
 [ -f "$rule" ]
@@ -100,7 +100,7 @@ grep -q 'eurozone_enabled' "$rule"
 grep -q -- '--config-dir' "$launch_agent"
 plutil -lint "$launch_agent"
 grep -q -- '--set-variables {"eurozone_enabled":1}' "$KARA_LOG"
-bash "$XDG_DATA_HOME/eurozone/eurozone" dollar >/dev/null
+"$BASH" "$XDG_DATA_HOME/eurozone/eurozone" dollar >/dev/null
 # Installed copy must refresh without copying a file onto itself.
 grep -q -- '--set-variables {"eurozone_enabled":0}' "$KARA_LOG"
 echo 'macOS native European setup/switch/typed-restore and startup payload PASS'

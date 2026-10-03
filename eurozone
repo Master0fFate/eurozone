@@ -5,7 +5,7 @@
 set -u
 IFS=$'\n\t'
 
-VERSION="3.0.0"
+VERSION="3.0.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROFILE_CATALOG="$SCRIPT_DIR/eurozone-profiles.tsv"
 
@@ -84,6 +84,8 @@ os_family() {
     *) echo unknown ;;
   esac
 }
+# The OS cannot change mid-run: detect it once instead of forking uname per check.
+EZ_OS="$(os_family)"
 
 script_path() {
   cd "$(dirname "$0")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$0")"
@@ -93,6 +95,8 @@ desktop_escape() {
   local value="$1"
   value=${value//\\/\\\\}
   value=${value//\"/\\\"}
+  value=${value//\$/\\\$}
+  value=${value//\`/\\\`}
   value=${value//%/%%}
   printf '%s' "$value"
 }
@@ -162,7 +166,7 @@ EOF
 }
 
 install_startup() {
-  case "$(os_family)" in
+  case "$EZ_OS" in
     linux) install_linux_startup ;;
     macos) install_macos_startup ;;
   esac
@@ -258,6 +262,20 @@ linux_locale_available() {
   '
 }
 
+# Setup never runs sudo. Tell the user the exact command for their distribution.
+linux_locale_hint() {
+  if command -v dnf >/dev/null 2>&1; then
+    err "install it with: sudo dnf install glibc-langpack-${POSIX_LOCALE%%_*}"
+  elif [ -d /var/lib/locales/supported.d ]; then
+    err "generate it with: sudo locale-gen $POSIX_LOCALE"
+  elif [ -f /etc/locale.gen ]; then
+    err "uncomment '$POSIX_LOCALE UTF-8' in /etc/locale.gen, then run: sudo locale-gen"
+  else
+    err "install or generate it with your distribution's locale tools"
+  fi
+  err "then run this setup again"
+}
+
 linux_locale_value() {
   # LC_ALL in the caller must not mask the candidate locale during inspection.
   LC_ALL="$POSIX_LOCALE" locale "$1" 2>/dev/null
@@ -265,7 +283,7 @@ linux_locale_value() {
 
 region_preflight() {
   local category currency
-  case "$(os_family)" in
+  case "$EZ_OS" in
     macos)
       command -v defaults >/dev/null 2>&1 && command -v plutil >/dev/null 2>&1 || {
         err "macOS setup needs the built-in defaults and plutil tools"; return 1;
@@ -273,7 +291,7 @@ region_preflight() {
       ;;
     linux)
       linux_locale_available "$POSIX_LOCALE" || {
-        err "locale $POSIX_LOCALE is not installed; generate/install it before setup (including GNOME)"; return 1;
+        err "locale $POSIX_LOCALE is not installed; no settings changed"; linux_locale_hint; return 1;
       }
       linux_region_backends
       [ "$GNOME_REGION" -eq 1 ] || [ "$SYSTEMD_ENV" -eq 1 ] || {
@@ -305,7 +323,7 @@ preview_region_profile() {
   printf '  Keep country-specific date, number and currency formatting; target EUR.\n'
   printf '  Targets: metric, Celsius, A4, 24-hour time, Monday and ISO-style weeks.\n'
   printf '  Preserve display language, keyboard layout, time zone and keyboard startup.\n'
-  case "$(os_family)" in
+  case "$EZ_OS" in
     macos)
       printf '  macOS global preferences (typed):\n'
       printf '    AppleLocale = %s@calendar=gregorian;currency=EUR (string; ICU-aware apps)\n' "${PROFILE_CULTURE//-/_}"
@@ -368,8 +386,8 @@ save_region_snapshot() {
   local dest="$1" key xml
   [ -d "$dest" ] || return 1
   printf '3\n' > "$dest/version" || return 1
-  os_family > "$dest/os" || return 1
-  case "$(os_family)" in
+  printf '%s\n' "$EZ_OS" > "$dest/os" || return 1
+  case "$EZ_OS" in
     macos)
       defaults export -g "$dest/global.plist" >/dev/null 2>&1 || return 1
       plutil -lint "$dest/global.plist" >/dev/null 2>&1 || return 1
@@ -435,10 +453,10 @@ restore_saved_file() {
 restore_region_snapshot() {
   local source="$1" key status value failed=0 target verification
   [ -f "$source/ready" ] && [ "$(cat "$source/version" 2>/dev/null)" = 3 ] &&
-    [ "$(cat "$source/os" 2>/dev/null)" = "$(os_family)" ] || {
+    [ "$(cat "$source/os" 2>/dev/null)" = "$EZ_OS" ] || {
       err "backup is incomplete, incompatible or belongs to another OS; retained at $source"; return 1;
     }
-  case "$(os_family)" in
+  case "$EZ_OS" in
     macos)
       for key in "${MAC_REGION_KEYS[@]}"; do
         status="$(cat "$source/$key.status" 2>/dev/null)" || { failed=1; continue; }
@@ -611,10 +629,10 @@ apply_region_profile() {
   # A switched backend must not acquire new unbacked GNOME keys. Restore first.
   if [ -e "$PROFILE_BACKUP_DIR" ]; then
     [ -f "$PROFILE_BACKUP_DIR/ready" ] && [ "$(cat "$PROFILE_BACKUP_DIR/version" 2>/dev/null)" = 3 ] &&
-      [ "$(cat "$PROFILE_BACKUP_DIR/os" 2>/dev/null)" = "$(os_family)" ] || {
+      [ "$(cat "$PROFILE_BACKUP_DIR/os" 2>/dev/null)" = "$EZ_OS" ] || {
         err "existing backup is incompatible/incomplete or from v2; use --restore-profile before setup; backup retained"; return 1;
       }
-    if [ "$(os_family)" = linux ]; then
+    if [ "$EZ_OS" = linux ]; then
       if { [ "$GNOME_REGION" -eq 1 ] && [ "$(cat "$PROFILE_BACKUP_DIR/gnome-region-status")" != 1 ]; } ||
           { [ "$GNOME_CLOCK" -eq 1 ] && [ "$(cat "$PROFILE_BACKUP_DIR/gnome-clock-status")" != 1 ]; } ||
           [ "$(cat "$PROFILE_BACKUP_DIR/environment-path")" != "$PROFILE_ENV_FILE" ]; then
@@ -636,7 +654,7 @@ apply_region_profile() {
       rm -rf "$temporary" "$transaction"; err "could not publish regional backup"; return 1
     fi
   fi
-  case "$(os_family)" in
+  case "$EZ_OS" in
     macos) apply_macos_region_profile || failed=1 ;;
     linux) apply_linux_region_profile || failed=1 ;;
   esac
@@ -662,7 +680,7 @@ apply_region_profile() {
   rm -rf "$transaction"
   ok "European setup applied: $PROFILE_NAME ($PROFILE_CULTURE); restart apps or sign in again"
   ok "display language, keyboard layout and time zone were not changed; no keyboard startup installed"
-  if [ "$(os_family)" = linux ]; then
+  if [ "$EZ_OS" = linux ]; then
     ok "locale supplies units/paper/week rules; Celsius, Monday, ISO weeks and 24h are not universal app overrides"
     if [ -n "${LC_ALL:-}" ]; then err "LC_ALL=$LC_ALL overrides the configured LC_* categories"; fi
     if grep -q '^[[:space:]]*LC_ALL[[:space:]]*=' "$PROFILE_ENV_FILE"; then
@@ -679,7 +697,7 @@ restore_legacy_region_profile() {
   local source="$PROFILE_BACKUP_DIR" status environment_status value verification
   # v2 had no version marker and touched only AppleLocale, or GNOME region and
   # the hard-coded ~/.config environment file. Do not guess new values from it.
-  case "$(os_family)" in
+  case "$EZ_OS" in
     macos)
       [ ! -e "$source/gnome-region-status" ] || return 1
       status="$(cat "$source/apple-locale-status" 2>/dev/null)" || return 1
@@ -833,12 +851,12 @@ apply_linux_xkb() {
 
 apply_linux() {
   local mode="$1" kc shifted
-  if ! command -v xmodmap >/dev/null 2>&1; then
-    err "xmodmap not found (needed to identify the X11 keycode)"
-    return 1
-  fi
   if [ "${XDG_SESSION_TYPE:-}" = wayland ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
     err "X11 remapping does not cover native Wayland apps; use your compositor's keyboard configuration"
+    return 1
+  fi
+  if ! command -v xmodmap >/dev/null 2>&1; then
+    err "xmodmap not found (needed to identify the X11 keycode)"
     return 1
   fi
   if [ -z "${DISPLAY:-}" ]; then
@@ -924,7 +942,7 @@ EOF
 apply_now() {
   local mode
   mode="$(read_mode)"
-  case "$(os_family)" in
+  case "$EZ_OS" in
     linux)   apply_linux "$mode" ;;
     macos)   apply_macos "$mode" ;;
     windows) ok "use eurozone.cmd on Windows" ;;
@@ -935,11 +953,11 @@ apply_now() {
 show_doctor() {
   printf '\n'
   ok "version   ${VERSION}"
-  ok "os        $(os_family)  ($(uname -s 2>/dev/null || echo ?))"
+  ok "os        $EZ_OS  ($(uname -s 2>/dev/null || echo ?))"
   ok "mode      $(read_mode)  $(symbol_for "$(read_mode)")"
   if [ -f "$PROFILE_ACTIVE_FILE" ]; then ok "profile   $(cat "$PROFILE_ACTIVE_FILE")"; else ok "profile   not set"; fi
   ok "config    ${CONF_DIR}"
-  case "$(os_family)" in
+  case "$EZ_OS" in
     linux)
       if [ -f "$AUTOSTART_FILE" ]; then ok "startup   registered"; else ok "startup   not registered"; fi
       ok "session   ${XDG_SESSION_TYPE:-unknown}"
@@ -1058,6 +1076,7 @@ show_help() {
     '  --list-profiles    List country IDs and locale codes' \
     '  --restore-profile Restore the original regional settings' \
     '  --help            Read-only help' \
+    '  --version         Print the version' \
     '  euro | dollar     Optional Shift+4 remap and keyboard login startup' \
     '  --startup         Reapply only the saved keyboard mode' \
     '  No arguments: menu; Enter/7 opens recommended setup and confirmation.' \

@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.0.1
+
+- Windows: tell running programs about the new formats after apply, restore
+  and rollback (`WM_SETTINGCHANGE`), so Explorer's clock updates without a
+  sign-out.
+- Windows: accept `--version` and the legacy `5`, `6`, `7`, `profile` and
+  `restore-profile` commands, same as Linux/macOS.
+- Windows: show the administrator note only when the euro hook is on.
+- Linux: a missing locale now prints the command that installs it.
+- Linux: report Wayland before a missing `xmodmap`.
+- Detect the operating system once per run.
+- CI: test with Apple's `/bin/bash` 3.2 on macOS; current checkout action.
+
 ## 3.0.0
 
 ### European setup

@@ -47,6 +47,8 @@ function Import-RegionSnapshot([string]$Path) {
     }
     $script:FakeRegistry = Import-Clixml -LiteralPath $Path
 }
+$script:Notices = 0
+function Send-RegionChangeNotice { $script:Notices++ }
 function Assert([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
 function State {
     return (($script:FakeRegistry.GetEnumerator() | Sort-Object Key | ForEach-Object { '{0}={1}:{2}' -f $_.Key, $_.Value.GetType().Name, $_.Value }) -join "`n")
@@ -97,12 +99,15 @@ try {
         $null = & $hostExe -NoProfile -File $parserPath @case
         Assert ($LASTEXITCODE -ne 0) ('Parser accepted: ' + ($case -join ' '))
     }
-    $null = & $hostExe -NoProfile -File $parserPath --preview DE
-    Assert ($LASTEXITCODE -eq 0) 'Parser rejected a valid preview'
+    foreach ($case in @(@('--preview','DE'), @('--version'), @('7'), @('restore-profile'))) {
+        $null = & $hostExe -NoProfile -File $parserPath @case
+        Assert ($LASTEXITCODE -eq 0) ('Parser rejected: ' + ($case -join ' '))
+    }
     Assert (-not (Test-Path $ConfDir)) 'Argument parsing created configuration'
 
     Set-RegionProfile 'IE-EN'
     Assert (Test-Path $ProfileBackupFile) 'Baseline not saved'
+    Assert ($script:Notices -eq 1) 'Apply did not notify running applications'
     $backupBytes = [Convert]::ToBase64String([IO.File]::ReadAllBytes($ProfileBackupFile))
     $first = State
     $firstActive = [IO.File]::ReadAllText($ProfileActiveFile)
@@ -125,6 +130,7 @@ try {
     Restore-RegionProfile
     Assert ((State) -ceq $baseline) 'Restore lost original types/values or kept added values'
     Assert (-not (Test-Path $ProfileBackupFile)) 'Successful restore did not consume backup'
+    Assert ($script:Notices -eq 5) 'Rollback or restore did not notify running applications'
     Assert (-not (Test-Path $ProfileActiveFile)) 'Successful restore left active metadata'
     Expect-Failure { Restore-RegionProfile } 'Restore accepted missing backup'
     'Isolated Windows plans, preview, apply/switch/restore and rollback PASS'

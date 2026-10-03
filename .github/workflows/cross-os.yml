@@ -6,10 +6,18 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   profile-smoke:
     name: ${{ matrix.os }} profile smoke test
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     env:
       EUROZONE_ALLOW_OS_TESTS: '1'
     strategy:
@@ -17,7 +25,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Check shell syntax and shared country profiles
         shell: bash
@@ -39,7 +47,11 @@ jobs:
       - name: Apply and restore macOS user region
         if: runner.os == 'macOS'
         shell: bash
-        run: bash tests/macos-profile-smoke.sh
+        # The launcher and login item use Apple's /bin/bash 3.2. Test that one.
+        run: |
+          /bin/bash --version | head -n 1
+          /bin/bash tests/unix-isolated-smoke.sh
+          /bin/bash tests/macos-profile-smoke.sh
 
       - name: Apply and restore Linux GNOME user region
         if: runner.os == 'Linux'
