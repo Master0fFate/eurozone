@@ -16,19 +16,15 @@ $ConfDir = Join-Path $tempRoot 'config with spaces'
 $ProfileActiveFile = Join-Path $ConfDir 'profile.active'
 $ProfileBackupFile = Join-Path $ConfDir 'profile.backup.reg'
 $ProfileCatalog = Join-Path $repoRoot 'eurozone-profiles.tsv'
-$InternationalKey = 'MockRegistry:\International'
+$InternationalKey = Join-Path $tempRoot 'fake-registry'
+$GeoKey = Join-Path $InternationalKey 'Geo'
 $InternationalRegistryKey = 'MOCK\International'
-$script:FakeRegistry = @{ 'MockRegistry:\International|LocaleName' = 'en-US'; 'MockRegistry:\International|iMeasure' = '1'; 'MockRegistry:\International|custom-value' = 42 }
+$script:FakeRegistry = @{ "$InternationalKey|LocaleName" = 'en-US'; "$InternationalKey|iMeasure" = '1'; "$InternationalKey|custom-value" = 42 }
 $script:FailName = ''
 $script:FailImport = $false
 
 function Set-Culture($CultureInfo) { $script:FakeRegistry["$InternationalKey|LocaleName"] = $CultureInfo.Name }
-function Set-WinHomeLocation($GeoId) { $script:FakeRegistry["$InternationalKey/Geo|Nation"] = [string]$GeoId }
-function Join-Path {
-    param([string]$Path, [string]$ChildPath)
-    if ($Path -eq $InternationalKey) { return "$Path/$ChildPath" }
-    Microsoft.PowerShell.Management\Join-Path -Path $Path -ChildPath $ChildPath
-}
+function Set-WinHomeLocation($GeoId) { $script:FakeRegistry["$GeoKey|Nation"] = [string]$GeoId }
 function New-ItemProperty {
     [CmdletBinding()] param($LiteralPath, $Name, $Value, $PropertyType, [switch]$Force)
     if ($script:FailName -eq $Name) { $script:FailName = ''; throw 'injected settings write failure' }
@@ -79,20 +75,46 @@ try {
     Expect-Failure { Get-RegionPlan 'unknown-country' } 'Invalid profile accepted'
     Assert ((State) -ceq $baseline) 'Preview changed fake OS state'
 
+    # Exercise the real argument parser in a child, stopping BEFORE path setup,
+    # function definitions or OS dispatch. Malformed applies cannot reach Windows.
+    $pathSetup = $ast.EndBlock.Statements | Where-Object {
+        $_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -eq '$ConfDir'
+    } | Select-Object -First 1
+    Assert ($null -ne $pathSetup) 'Could not isolate the argument parser'
+    New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+    $parserPath = Join-Path $tempRoot 'parser-only.ps1'
+    $prefix = [IO.File]::ReadAllText($scriptPath).Substring(0, $pathSetup.Extent.StartOffset)
+    [IO.File]::WriteAllText($parserPath, ($prefix + "`nexit 0`n"))
+    $hostExe = (Get-Process -Id $PID).Path
+    $invalidCases = @(
+        @('--profile'), @('--setup','DE','stray'), @('--preview','DE','stray'),
+        @('--restore-profile','stray'), @('--list-profiles','stray'),
+        @('--unknown'), @('--config-dir'), @('--install-dir'),
+        @('--profile','--help'), @('--preview','--help'),
+        @('--config-dir','one','--config-dir','two','--help')
+    )
+    foreach ($case in $invalidCases) {
+        $null = & $hostExe -NoProfile -File $parserPath @case
+        Assert ($LASTEXITCODE -ne 0) ('Parser accepted: ' + ($case -join ' '))
+    }
+    $null = & $hostExe -NoProfile -File $parserPath --preview DE
+    Assert ($LASTEXITCODE -eq 0) 'Parser rejected a valid preview'
+    Assert (-not (Test-Path $ConfDir)) 'Argument parsing created configuration'
+
     Set-RegionProfile 'IE-EN'
     Assert (Test-Path $ProfileBackupFile) 'Baseline not saved'
-    $backupHash = (Get-FileHash $ProfileBackupFile).Hash
+    $backupBytes = [Convert]::ToBase64String([IO.File]::ReadAllBytes($ProfileBackupFile))
     $first = State
     $firstActive = [IO.File]::ReadAllText($ProfileActiveFile)
     $script:FailName = 'sTimeFormat'
     Expect-Failure { Set-RegionProfile 'FR' } 'Injected apply failure was swallowed'
     Assert ((State) -ceq $first) 'Failed switch did not roll back all settings'
     Assert ([IO.File]::ReadAllText($ProfileActiveFile) -ceq $firstActive) 'Failed switch changed active metadata'
-    Assert ((Get-FileHash $ProfileBackupFile).Hash -eq $backupHash) 'Switch replaced original backup'
+    Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes($ProfileBackupFile)) -eq $backupBytes) 'Switch replaced original backup'
 
     Set-RegionProfile 'FR'
     Assert ($script:FakeRegistry["$InternationalKey|LocaleName"] -eq 'fr-FR') 'Profile switch did not apply culture'
-    Assert ((Get-FileHash $ProfileBackupFile).Hash -eq $backupHash) 'Successful switch replaced original backup'
+    Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes($ProfileBackupFile)) -eq $backupBytes) 'Successful switch replaced original backup'
     $second = State
     $script:FailImport = $true
     Expect-Failure { Restore-RegionProfile } 'Injected restore failure was swallowed'
