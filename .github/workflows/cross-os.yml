@@ -22,7 +22,7 @@ jobs:
       - name: Check shell syntax and shared country profiles
         shell: bash
         run: |
-          bash -n eurozone eurozone.command
+          for script in eurozone eurozone.command tests/*.sh; do bash -n "$script"; done
           bash tests/profile-catalog-smoke.sh
           bash tests/unix-isolated-smoke.sh
 

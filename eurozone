@@ -107,8 +107,8 @@ plist_escape() {
 
 install_linux_startup() {
   mkdir -p "$INSTALL_DIR" "$(dirname "$AUTOSTART_FILE")" || return 1
-  if [ "$(script_path)" != "$INSTALLED_SCRIPT" ]; then cp "$(script_path)" "$INSTALLED_SCRIPT" || return 1; fi
-  if [ "$PROFILE_CATALOG" != "$INSTALL_DIR/eurozone-profiles.tsv" ]; then
+  if [ ! "$(script_path)" -ef "$INSTALLED_SCRIPT" ]; then cp "$(script_path)" "$INSTALLED_SCRIPT" || return 1; fi
+  if [ ! "$PROFILE_CATALOG" -ef "$INSTALL_DIR/eurozone-profiles.tsv" ]; then
     cp "$PROFILE_CATALOG" "$INSTALL_DIR/eurozone-profiles.tsv" || return 1
   fi
   chmod 700 "$INSTALLED_SCRIPT" || return 1
@@ -128,8 +128,9 @@ EOF
 
 install_macos_startup() {
   mkdir -p "$INSTALL_DIR" "$(dirname "$MAC_LAUNCH_AGENT")" || return 1
-  if [ "$(script_path)" != "$INSTALLED_SCRIPT" ]; then cp "$(script_path)" "$INSTALLED_SCRIPT" || return 1; fi
-  if [ "$PROFILE_CATALOG" != "$INSTALL_DIR/eurozone-profiles.tsv" ]; then
+  # /var and /private/var are aliases on macOS. Compare file identity, not text.
+  if [ ! "$(script_path)" -ef "$INSTALLED_SCRIPT" ]; then cp "$(script_path)" "$INSTALLED_SCRIPT" || return 1; fi
+  if [ ! "$PROFILE_CATALOG" -ef "$INSTALL_DIR/eurozone-profiles.tsv" ]; then
     cp "$PROFILE_CATALOG" "$INSTALL_DIR/eurozone-profiles.tsv" || return 1
   fi
   chmod 700 "$INSTALLED_SCRIPT" || return 1
