@@ -10,6 +10,8 @@ jobs:
   profile-smoke:
     name: ${{ matrix.os }} profile smoke test
     runs-on: ${{ matrix.os }}
+    env:
+      EUROZONE_ALLOW_OS_TESTS: '1'
     strategy:
       fail-fast: false
       matrix:
@@ -20,8 +22,14 @@ jobs:
       - name: Check shell syntax and shared country profiles
         shell: bash
         run: |
-          bash -n eurozone
+          bash -n eurozone eurozone.command
           bash tests/profile-catalog-smoke.sh
+          bash tests/unix-isolated-smoke.sh
+
+      - name: Check isolated Windows parsing and regional behavior
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/windows-isolated-smoke.ps1
 
       - name: Apply and restore Windows user region
         if: runner.os == 'Windows'
@@ -41,6 +49,7 @@ jobs:
           sudo apt-get install -y dbus-daemon dbus-x11 dconf-gsettings-backend gsettings-desktop-schemas locales x11-xkb-utils x11-xserver-utils xvfb
           sudo sed -i '/^# *de_DE.UTF-8 UTF-8/s/^# *//' /etc/locale.gen
           sudo sed -i '/^# *fr_FR.UTF-8 UTF-8/s/^# *//' /etc/locale.gen
+          sudo sed -i '/^# *en_IE.UTF-8 UTF-8/s/^# *//' /etc/locale.gen
           sudo locale-gen
           xvfb-run -a --server-args='-noreset' bash tests/linux-x11-key-smoke.sh
           bash tests/linux-profile-smoke.sh

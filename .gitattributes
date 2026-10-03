@@ -1,0 +1,10 @@
+# Bash must remain executable on Unix even after a Windows checkout.
+* text=auto
+/eurozone text eol=lf
+*.sh text eol=lf
+*.command text eol=lf
+*.ps1 text eol=lf
+*.tsv text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.cmd text eol=crlf

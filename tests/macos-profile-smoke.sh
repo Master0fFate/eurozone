@@ -1,15 +1,28 @@
 #!/usr/bin/env bash
+# Native integration: run only in a disposable macOS account / CI runner.
 set -euo pipefail
-
+if [ "${EUROZONE_ALLOW_OS_TESTS:-0}" != 1 ]; then
+  echo 'Native test requires EUROZONE_ALLOW_OS_TESTS=1 in a disposable account.' >&2
+  exit 1
+fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+# CFPreferences can ignore HOME. Protect the actual runner global preferences.
+defaults export -g "$tmp/original-globals.plist"
+cleanup() {
+  defaults import -g "$tmp/original-globals.plist" || {
+    echo "Cannot recover test account. Keep $tmp/original-globals.plist" >&2
+    return 1
+  }
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
 export HOME="$tmp/home"
 export XDG_CONFIG_HOME="$tmp/config"
 export XDG_CACHE_HOME="$tmp/cache"
 export XDG_DATA_HOME="$tmp/data"
 export KARA_LOG="$tmp/karabiner.log"
-mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$tmp/bin"
+mkdir -p "$HOME" "$tmp/bin"
 cat > "$tmp/bin/karabiner_cli" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$KARA_LOG"
@@ -17,20 +30,50 @@ EOF
 chmod +x "$tmp/bin/karabiner_cli"
 export PATH="$tmp/bin:$PATH"
 
-before="$(defaults read -g AppleLocale 2>/dev/null || printf '__MISSING__')"
-bash "$repo_root/eurozone" --profile IE-EN
-actual="$(defaults read -g AppleLocale)"
-[ "$actual" = "en_IE" ]
-[ -f "$XDG_CONFIG_HOME/eurozone/profile-backup/apple-locale-status" ]
-[ -f "$XDG_CONFIG_HOME/eurozone/profile.active" ]
+keys=(AppleLocale AppleMetricUnits AppleMeasurementUnits AppleTemperatureUnit AppleICUForce24HourTime AppleICUForce12HourTime AppleFirstWeekday AppleMinDaysInFirstWeek)
+state() {
+  local key
+  for key in "${keys[@]}"; do
+    printf '%s\n' "$key"
+    defaults read-type -g "$key" 2>/dev/null || printf '__MISSING_TYPE__\n'
+    defaults read -g "$key" 2>/dev/null || printf '__MISSING_VALUE__\n'
+  done
+}
+# Deliberately test both existing keys and absent keys, plus dictionary siblings.
+defaults write -g AppleMetricUnits -bool false
+defaults write -g AppleMeasurementUnits -string Inches
+defaults write -g AppleTemperatureUnit -string Fahrenheit
+defaults delete -g AppleICUForce24HourTime >/dev/null 2>&1 || true
+defaults write -g AppleICUForce12HourTime -bool true
+defaults write -g AppleFirstWeekday -dict gregorian 1 buddhist 3
+defaults write -g AppleMinDaysInFirstWeek -dict gregorian 1 buddhist 2
+state > "$tmp/before"
 
+bash "$repo_root/eurozone" --preview DE
+[ ! -e "$XDG_CONFIG_HOME" ]
+bash "$repo_root/eurozone" --setup
+actual="$(defaults read -g AppleLocale)"
+[[ "$actual" == en_IE@*currency=EUR* ]]
+[ "$(defaults read -g AppleMetricUnits)" = 1 ]
+[ "$(defaults read -g AppleMeasurementUnits)" = Centimeters ]
+[ "$(defaults read -g AppleTemperatureUnit)" = Celsius ]
+[ "$(defaults read -g AppleICUForce24HourTime)" = 1 ]
+[ "$(defaults read -g AppleICUForce12HourTime)" = 0 ]
+defaults export -g "$tmp/applied.plist"
+[ "$(plutil -extract AppleFirstWeekday.gregorian raw -o - "$tmp/applied.plist")" = 2 ]
+[ "$(plutil -extract AppleMinDaysInFirstWeek.gregorian raw -o - "$tmp/applied.plist")" = 4 ]
+[ "$(plutil -extract AppleFirstWeekday.buddhist raw -o - "$tmp/applied.plist")" = 3 ]
+[ -f "$XDG_CONFIG_HOME/eurozone/profile.active" ]
+[ ! -e "$HOME/Library/LaunchAgents/com.eurozone.startup.plist" ]
+
+bash "$repo_root/eurozone" --profile FR
+[[ "$(defaults read -g AppleLocale)" == fr_FR@*currency=EUR* ]]
 bash "$repo_root/eurozone" --restore-profile
-after="$(defaults read -g AppleLocale 2>/dev/null || printf '__MISSING__')"
-[ "$after" = "$before" ]
+state > "$tmp/after"
+cmp "$tmp/before" "$tmp/after"
 [ ! -e "$XDG_CONFIG_HOME/eurozone/profile.active" ]
 
-# The keyboard service is represented by a local CLI stub. This checks our
-# rule, launch-agent, and variable payload, not a live Karabiner install.
+# Stub checks our payload, not a live Karabiner install or non-US input layout.
 bash "$repo_root/eurozone" euro >/dev/null
 rule="$HOME/.config/karabiner/assets/complex_modifications/eurozone.json"
 launch_agent="$HOME/Library/LaunchAgents/com.eurozone.startup.plist"
@@ -40,6 +83,7 @@ grep -q 'eurozone_enabled' "$rule"
 grep -q -- '--config-dir' "$launch_agent"
 plutil -lint "$launch_agent"
 grep -q -- '--set-variables {"eurozone_enabled":1}' "$KARA_LOG"
-bash "$repo_root/eurozone" dollar >/dev/null
+bash "$XDG_DATA_HOME/eurozone/eurozone" dollar >/dev/null
+# Installed copy must refresh without copying a file onto itself.
 grep -q -- '--set-variables {"eurozone_enabled":0}' "$KARA_LOG"
-echo "macOS regional profile and startup/keyboard configuration PASS"
+echo 'macOS native European setup/switch/typed-restore and startup payload PASS'

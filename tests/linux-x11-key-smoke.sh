@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${EUROZONE_ALLOW_OS_TESTS:-0}" != 1 ]; then
+  echo 'Native test requires EUROZONE_ALLOW_OS_TESTS=1 in a disposable X server.' >&2
+  exit 1
+fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 tmp="$(mktemp -d)"
