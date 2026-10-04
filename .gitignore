@@ -7,3 +7,8 @@ Desktop.ini
 *.swo
 .idea/
 .vscode/
+
+# Local tool indexes and agent state
+.codeviewer-mcp.sqlite*
+.codegraph/
+.claude/
